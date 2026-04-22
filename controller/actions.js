@@ -351,18 +351,40 @@ async function tryAutoEat(adapter, trackingState) {
   if (trackingState.knockbackCooldown > 0) return false;
 
   const items = adapter.inventoryItems;
-  const foodItem = items.find(i => FOOD_ITEMS.has(i.name));
+
+  // Find food in hotbar (slots 0-8) first, then anywhere in inventory
+  let foodItem = items.find(i => FOOD_ITEMS.has(i.name) && i.slot !== undefined && i.slot <= 8);
+  if (!foodItem) {
+    foodItem = items.find(i => FOOD_ITEMS.has(i.name));
+  }
   if (!foodItem) return false;
 
   try {
+    const prevSlot = adapter.quickBarSlot;
+
+    // Switch to the food slot if it's in the hotbar
+    if (foodItem.slot !== undefined && foodItem.slot <= 8) {
+      adapter.setQuickBarSlot(foodItem.slot);
+      await sleep(100);
+    }
+
     await adapter.activateItem();
     await sleep(1700);
     for (let i = 0; i < 10 && adapter.food < 20; i++) {
-      const remaining = adapter.inventoryItems.find(it => FOOD_ITEMS.has(it.name));
+      const remaining = adapter.inventoryItems.find(it =>
+        FOOD_ITEMS.has(it.name) && it.slot !== undefined && it.slot <= 8
+      ) || adapter.inventoryItems.find(it => FOOD_ITEMS.has(it.name));
       if (!remaining) break;
+      if (remaining.slot !== undefined && remaining.slot <= 8) {
+        adapter.setQuickBarSlot(remaining.slot);
+        await sleep(100);
+      }
       await adapter.activateItem();
       await sleep(1700);
     }
+
+    // Restore previous slot
+    adapter.setQuickBarSlot(prevSlot);
   } catch (_) {}
 
   return true;

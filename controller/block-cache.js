@@ -17,6 +17,7 @@
 
 const mcData = require('minecraft-data');
 const bpOptions = require('bedrock-protocol/src/options');
+const nbt = require('prismarine-nbt');
 
 class BlockCache {
   constructor(options = {}) {
@@ -320,12 +321,20 @@ class BlockCache {
 
     // Single-block sub-chunk (all same block)
     if (bitsPerBlock === 0) {
-      if (paletteType !== 1) return null; // Can't parse NBT palette here
-      const vr = this._readSignedVarint(buffer, offset);
-      if (!vr) return null;
-      const name = this._palette.get(vr.value) || 'air';
+      let name;
+      if (paletteType === 1) {
+        const vr = this._readSignedVarint(buffer, offset);
+        if (!vr) return null;
+        name = this._palette.get(vr.value) || 'air';
+        offset = vr.offset;
+      } else {
+        const nr = this._readNbtName(buffer, offset);
+        if (!nr) return null;
+        name = nr.name;
+        offset = nr.offset;
+      }
       const blocks = new Uint16Array(4096); // all 0
-      return { storage: { blocks, palette: [name] }, offset: vr.offset };
+      return { storage: { blocks, palette: [name] }, offset };
     }
 
     // Read padded bit array
@@ -354,7 +363,7 @@ class BlockCache {
 
     const palette = [];
     if (paletteType === 1) {
-      // Runtime IDs — map through start_game block palette
+      // Runtime IDs — map through minecraft-data block palette
       for (let i = 0; i < paletteSize; i++) {
         const vr = this._readSignedVarint(buffer, offset);
         if (!vr) return null;
@@ -362,8 +371,13 @@ class BlockCache {
         offset = vr.offset;
       }
     } else {
-      // Persistence (NBT) — can't parse easily, bail
-      return null;
+      // Persistence (NBT) — each entry is a compound tag {name, states}
+      for (let i = 0; i < paletteSize; i++) {
+        const nr = this._readNbtName(buffer, offset);
+        if (!nr) return null;
+        palette.push(nr.name);
+        offset = nr.offset;
+      }
     }
 
     return { storage: { blocks, palette }, offset };
@@ -377,9 +391,12 @@ class BlockCache {
     const paletteType = header & 1;
 
     if (bitsPerBlock === 0) {
-      if (paletteType !== 1) return null;
-      const vr = this._readSignedVarint(buffer, offset);
-      return vr ? vr.offset : null;
+      if (paletteType === 1) {
+        const vr = this._readSignedVarint(buffer, offset);
+        return vr ? vr.offset : null;
+      }
+      const nr = this._readNbtName(buffer, offset);
+      return nr ? nr.offset : null;
     }
 
     const blocksPerWord = Math.floor(32 / bitsPerBlock);
@@ -399,10 +416,33 @@ class BlockCache {
         offset = vr.offset;
       }
     } else {
-      return null; // Can't skip NBT easily
+      for (let i = 0; i < paletteSize; i++) {
+        const nr = this._readNbtName(buffer, offset);
+        if (!nr) return null;
+        offset = nr.offset;
+      }
     }
 
     return offset;
+  }
+
+  /**
+   * Read one NBT compound tag from a persistence palette entry.
+   * Returns { name: "stone", offset } or null.
+   * Bedrock uses little-endian NBT.
+   */
+  _readNbtName(buffer, offset) {
+    try {
+      const slice = buffer.slice(offset);
+      const tag = nbt.parseUncompressed(slice, 'little');
+      const simple = nbt.simplify(tag);
+      const name = (simple.name || '').replace('minecraft:', '');
+      // Measure consumed bytes by roundtripping through write
+      const size = nbt.writeUncompressed(tag, 'little').length;
+      return { name: name || 'unknown', offset: offset + size };
+    } catch (_) {
+      return null;
+    }
   }
 
   _readUnsignedVarint(buffer, offset) {

@@ -66,6 +66,13 @@ class RelayAdapter {
 
     // Biome (estimated)
     this._biome = 'plains';
+
+    // Crafting recipes (from crafting_data packet)
+    // Map of recipe output name → { network_id, inputs: [{name, count}], outputs: [{name, count, network_id}] }
+    this._recipes = new Map();
+
+    // Auto-incrementing request ID for item_stack_request
+    this._nextRequestId = 1;
   }
 
   /**
@@ -266,12 +273,20 @@ class RelayAdapter {
 
       case 'inventory_content':
         if (params.window_id === 0) {
-          this._inventory = (params.input || []).filter(item =>
-            item && item.network_id !== 0
-          ).map(item => ({
-            name: (item.metadata?.name || `item_${item.network_id}`).replace('minecraft:', ''),
-            count: item.count || 1,
-          }));
+          this._inventory = [];
+          const items = params.input || [];
+          for (let slot = 0; slot < items.length; slot++) {
+            const item = items[slot];
+            if (!item || item.network_id === 0) continue;
+            this._inventory.push({
+              name: (item.metadata?.name || `item_${item.network_id}`).replace('minecraft:', ''),
+              count: item.count || 1,
+              slot,
+              network_id: item.network_id,
+              stack_id: item.stack_id || 0,
+              metadata: item.metadata || {},
+            });
+          }
         }
         break;
 
@@ -293,6 +308,10 @@ class RelayAdapter {
             this.clearControlStates();
           }
         }
+        break;
+
+      case 'crafting_data':
+        this._parseCraftingData(params);
         break;
 
       case 'level_chunk':
@@ -574,10 +593,17 @@ class RelayAdapter {
     this._quickBarSlot = slot;
     if (!this._player) return;
     try {
-      this._player.upstream.queue('player_hotbar', {
-        selected_hotbar_slot: slot,
+      // Find the item currently in the target slot
+      const slotItem = this._inventory.find(i => i.slot === slot);
+      this._player.upstream.queue('mob_equipment', {
+        runtime_entity_id: this._runtimeEntityId,
+        item: slotItem
+          ? { network_id: slotItem.network_id, count: slotItem.count, metadata: 0,
+              has_stack_id: 1, stack_id: slotItem.stack_id, block_runtime_id: 0, extra: { has_nbt: 0, can_place_on: [], can_destroy: [] } }
+          : { network_id: 0 },
+        slot: slot,
+        selected_slot: slot,
         window_id: 0,
-        select_hotbar_slot: true,
       });
     } catch (_) {}
   }
@@ -596,12 +622,145 @@ class RelayAdapter {
     } catch (_) {}
   }
 
+  // ---- Crafting ----
+
+  _parseCraftingData(params) {
+    this._recipes.clear();
+    const recipes = params.recipes || [];
+    for (const entry of recipes) {
+      const recipe = entry.recipe;
+      if (!recipe) continue;
+      // Only handle shapeless and shaped recipes
+      const type = entry.type;
+      if (type !== 'shapeless' && type !== 'shaped' && type !== 0 && type !== 1) continue;
+      const outputs = recipe.output || [];
+      const networkId = recipe.network_id;
+      if (!networkId || outputs.length === 0) continue;
+
+      const inputs = (recipe.input || []).map(i => ({
+        name: (i.name || i.network_id_or_tag || '').toString().replace('minecraft:', ''),
+        count: i.count || 1,
+        network_id: i.network_id || i.network_id_or_tag || 0,
+      }));
+
+      for (const out of outputs) {
+        const outName = (out.name || `item_${out.network_id}`).replace('minecraft:', '');
+        if (!this._recipes.has(outName)) {
+          this._recipes.set(outName, []);
+        }
+        this._recipes.get(outName).push({
+          network_id: networkId,
+          uuid: recipe.uuid,
+          inputs,
+          output_name: outName,
+          output_count: out.count || 1,
+          output_network_id: out.network_id || 0,
+          block: recipe.block || '',
+        });
+      }
+    }
+    console.log(`[relay] Parsed ${this._recipes.size} unique craftable items from crafting_data.`);
+  }
+
+  /**
+   * Find a recipe that we can craft with current inventory.
+   * Returns { recipe, matchedInputs } or null.
+   */
+  _findCraftableRecipe(outputPattern, requireBlock) {
+    // Search recipes whose output name contains the pattern
+    for (const [outName, recipes] of this._recipes) {
+      if (!outName.includes(outputPattern)) continue;
+      for (const recipe of recipes) {
+        // If we need a crafting table, skip 2x2 recipes
+        if (requireBlock && recipe.block !== 'crafting_table') continue;
+        // Check if we have all inputs in inventory
+        const invCopy = this._inventory.map(i => ({ ...i }));
+        let canCraft = true;
+        const matchedInputs = [];
+        for (const input of recipe.inputs) {
+          const idx = invCopy.findIndex(i =>
+            i.name.includes(input.name) && i.count >= input.count
+          );
+          if (idx < 0) { canCraft = false; break; }
+          matchedInputs.push({ ...invCopy[idx], needed: input.count });
+          invCopy[idx].count -= input.count;
+        }
+        if (canCraft) return { recipe, matchedInputs };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Send an item_stack_request to craft a recipe.
+   */
+  async _sendCraftRequest(recipe, matchedInputs) {
+    if (!this._player) return false;
+    const requestId = this._nextRequestId++;
+
+    // Build the ingredient list for craft_recipe_auto
+    const ingredients = matchedInputs.map(i => ({
+      network_id: i.network_id,
+      count: i.needed,
+      metadata: 0,
+    }));
+
+    try {
+      this._player.upstream.queue('item_stack_request', {
+        requests: [{
+          request_id: requestId,
+          actions: [
+            {
+              type_id: 'craft_recipe_auto',
+              recipe_network_id: recipe.network_id,
+              times_crafted: 1,
+              times_crafted_2: 1,
+              ingredients,
+            },
+            {
+              type_id: 'results_deprecated',
+              result_items: [{
+                network_id: recipe.output_network_id,
+                count: recipe.output_count,
+                metadata: 0,
+                has_stack_id: 0,
+                stack_id: 0,
+                block_runtime_id: 0,
+                extra: { has_nbt: 0, can_place_on: [], can_destroy: [] },
+              }],
+              times_crafted: 1,
+            },
+          ],
+        }],
+      });
+      console.log(`[relay] Sent craft request for ${recipe.output_name} (recipe ${recipe.network_id}).`);
+      // Give server time to process and send updated inventory
+      await sleep(500);
+      return true;
+    } catch (e) {
+      console.error('[relay] Craft request failed:', e.message);
+      return false;
+    }
+  }
+
   async craftPlanks() {
-    console.log('[relay] Crafting not yet implemented.');
+    const result = this._findCraftableRecipe('planks', false);
+    if (!result) {
+      console.log('[relay] Cannot craft planks — no logs in inventory or recipe not found.');
+      return;
+    }
+    await this._sendCraftRequest(result.recipe, result.matchedInputs);
   }
 
   async craftToolOrSticks() {
-    console.log('[relay] Crafting not yet implemented.');
+    // Try wooden pickaxe first, then sticks
+    let result = this._findCraftableRecipe('pickaxe', false);
+    if (!result) result = this._findCraftableRecipe('stick', false);
+    if (!result) {
+      console.log('[relay] Cannot craft tool or sticks — missing materials or recipe not found.');
+      return;
+    }
+    await this._sendCraftRequest(result.recipe, result.matchedInputs);
   }
 
   disconnect() {
