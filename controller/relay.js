@@ -17,6 +17,7 @@
 
 const bedrock = require('bedrock-protocol');
 const { sleep, waitTicks } = require('./utils');
+const { BlockCache } = require('./block-cache');
 
 class RelayAdapter {
   constructor(config) {
@@ -46,8 +47,8 @@ class RelayAdapter {
     // Inventory (from inventory_content packets)
     this._inventory = [];
 
-    // Block cache (from level_chunk packets, optional)
-    this._blockCache = new Map();
+    // Block cache (parses level_chunk / update_block for blockAt())
+    this._blockCache = new BlockCache();
 
     // --- Bot control state ---
     // When true, FPI agent controls the character.
@@ -159,6 +160,7 @@ class RelayAdapter {
         if (params.player_position) {
           this._updatePosition(params.player_position);
         }
+        this._blockCache.handleStartGame(params);
         console.log(`[relay] Game started. Runtime ID: ${this._runtimeEntityId}`);
         break;
 
@@ -287,6 +289,19 @@ class RelayAdapter {
             this.clearControlStates();
           }
         }
+        break;
+
+      case 'level_chunk':
+        this._blockCache.handleLevelChunk(params);
+        this._blockCache.prune(this._position);
+        break;
+
+      case 'sub_chunk':
+        this._blockCache.handleSubChunk(params);
+        break;
+
+      case 'update_block':
+        this._blockCache.handleUpdateBlock(params);
         break;
 
       case 'player_hotbar':
@@ -448,10 +463,8 @@ class RelayAdapter {
     return 15;
   }
 
-  blockAt(_pos) {
-    // Block data from level_chunk packets could be parsed here.
-    // For now, return null (same as BedrockBot).
-    return null;
+  blockAt(pos) {
+    return this._blockCache.blockAt(pos);
   }
 
   nearestEntity(filter) {

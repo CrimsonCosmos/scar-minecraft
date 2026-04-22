@@ -81,6 +81,7 @@ def run_minecraft(
     transfer_path: str | None = None,
     factored: bool = False,
     save_path: str | None = None,
+    observe_only: bool = False,
 ) -> None:
     """Run FPI agent in Minecraft.
 
@@ -158,6 +159,12 @@ def run_minecraft(
     print(f"[fpi-minecraft] Connecting to bridge at {host}:{port}...")
     obs = env.reset()
     print(f"[fpi-minecraft] Connected. Phase {phase}, {len(env.action_space)} actions.")
+
+    if not observe_only:
+        env.set_bot_control(True)
+        print("[fpi-minecraft] Bot control enabled — agent is driving.")
+    else:
+        print("[fpi-minecraft] Observe-only mode — agent watches, does not act.")
     if until_converge:
         print("[fpi-minecraft] Running until convergence (patience=2000 steps)...")
     else:
@@ -266,6 +273,13 @@ def run_minecraft(
             pickle.dump(saved, f)
         print("[fpi-minecraft] Saved.")
 
+    if not observe_only:
+        try:
+            env.set_bot_control(False)
+            print("[fpi-minecraft] Bot control disabled.")
+        except Exception:
+            pass
+
     env.close()
 
 
@@ -300,6 +314,10 @@ def main() -> None:
         "--config", type=str, default=None,
         help="Load server config from JSON file (overrides --host/--port/--phase)",
     )
+    parser.add_argument(
+        "--observe-only", action="store_true",
+        help="Watch user play without taking control (learn passively)",
+    )
 
     args = parser.parse_args()
 
@@ -332,6 +350,7 @@ def main() -> None:
             transfer_path=args.transfer,
             factored=args.factored,
             save_path=args.save,
+            observe_only=args.observe_only,
         )
     except KeyboardInterrupt:
         print("\n[fpi-minecraft] Interrupted.")

@@ -188,6 +188,26 @@ class MinecraftBridge:
             raise BridgeError(f"Respawn error: {response.get('message')}")
         return response
 
+    def send_bot_control(self, enabled: bool) -> dict:
+        """Toggle FPI agent control of the character.
+
+        When enabled, the relay suppresses the real client's movement/attack
+        packets and the FPI agent's actions are injected instead. When
+        disabled, the real client resumes normal play and actions sent via
+        the bridge are ignored.
+
+        Args:
+            enabled: True to let the FPI agent drive, False for user control.
+
+        Returns:
+            Ack response dict with ``bot_control_active`` key.
+        """
+        self._send({"cmd": "bot_control", "enabled": enabled})
+        response = self._recv()
+        if response.get("type") == "error":
+            raise BridgeError(f"Bot control error: {response.get('message')}")
+        return response
+
     def _send(self, msg: dict) -> None:
         """Send a JSON message followed by newline."""
         if self._sock is None:

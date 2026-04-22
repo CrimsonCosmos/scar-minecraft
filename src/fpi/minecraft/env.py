@@ -278,6 +278,15 @@ class MinecraftEnv(Environment):
         # Never done — Minecraft is continuous
         return observation, energy_delta, False
 
+    def set_bot_control(self, enabled: bool) -> None:
+        """Enable or disable FPI agent control of the character.
+
+        When enabled, the relay suppresses the real client's inputs and the
+        agent's actions are injected.  When disabled, the user plays normally
+        and the agent only observes.
+        """
+        self._bridge.send_bot_control(enabled)
+
     def close(self) -> None:
         """Disconnect from the Mineflayer bot."""
         self._bridge.close()
