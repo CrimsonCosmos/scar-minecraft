@@ -1,0 +1,14 @@
+{
+  "name": "scar-minecraft",
+  "version": "0.1.0",
+  "description": "FPI agent controlling a real Minecraft Bedrock client via bedrock-protocol Relay",
+  "main": "controller/main.js",
+  "scripts": {
+    "start": "node controller/main.js",
+    "start:realm": "node controller/main.js --realm-invite",
+    "start:stealth": "node controller/main.js --stealth"
+  },
+  "dependencies": {
+    "bedrock-protocol": "^3.55.0"
+  }
+}

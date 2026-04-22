@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scar-minecraft"
+version = "0.1.0"
+description = "FPI agent controlling a real Minecraft Bedrock client via bedrock-protocol Relay"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+fpi = "fpi.live.cli:main"
+scar-minecraft = "fpi.minecraft.runner:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fpi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
