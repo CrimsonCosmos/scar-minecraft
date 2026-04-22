@@ -1,9 +1,10 @@
 /**
  * Block cache — parses Bedrock sub-chunk data to provide blockAt().
  *
- * Captures the block palette from start_game, then parses level_chunk
- * and update_block packets to build a spatial block index. Chunks far
- * from the player are pruned automatically.
+ * Loads the canonical block-state→runtime-ID table from minecraft-data
+ * (15k+ entries), then parses level_chunk and update_block packets to
+ * build a spatial block index.  Chunks far from the player are pruned
+ * automatically.
  *
  * Bedrock sub-chunk format (version 8/9):
  *   u8 version
@@ -14,9 +15,13 @@
  *     Palette: unsigned varint count, then signed varints (runtime IDs)
  */
 
+const mcData = require('minecraft-data');
+const bpOptions = require('bedrock-protocol/src/options');
+
 class BlockCache {
   constructor(options = {}) {
-    // Runtime ID → block name (from start_game block_palette)
+    // Runtime ID → block name.
+    // Loaded from minecraft-data for the protocol version bedrock-protocol targets.
     this._palette = new Map();
 
     // Chunk columns: "cx,cz" → Array(24) of SubChunk | null
@@ -31,22 +36,62 @@ class BlockCache {
     this._lastPruneChunk = null;
 
     this._ready = false;
+
+    // Load palette immediately from minecraft-data
+    this._loadPaletteFromMcData();
   }
 
   /**
-   * Extract block palette from start_game packet.
-   * The array index IS the runtime ID.
+   * Load the canonical runtime block palette from minecraft-data.
+   * The blockStates array index IS the runtime ID.
+   */
+  _loadPaletteFromMcData() {
+    // Try versions in preference order: current protocol → recent fallbacks
+    const currentVer = bpOptions.CURRENT_VERSION;
+    const candidates = [
+      `bedrock_${currentVer}`,
+      'bedrock_1.21.80',
+      'bedrock_1.21.60',
+      'bedrock_1.21.0',
+      'bedrock_1.20.80',
+    ];
+
+    for (const ver of candidates) {
+      try {
+        const data = mcData(ver);
+        if (data && data.blockStates && data.blockStates.length > 0) {
+          for (let i = 0; i < data.blockStates.length; i++) {
+            const name = (data.blockStates[i].name || '').replace('minecraft:', '');
+            this._palette.set(i, name || 'unknown');
+          }
+          this._ready = true;
+          console.log(`[block-cache] Loaded ${this._palette.size} block states from minecraft-data (${ver}).`);
+          return;
+        }
+      } catch (_) {}
+    }
+    console.warn('[block-cache] Could not load block palette from minecraft-data. blockAt() will not work until start_game.');
+  }
+
+  /**
+   * Extend palette with any custom blocks from start_game packet.
+   * Vanilla Realms typically send no custom blocks, but modded servers might.
    */
   handleStartGame(params) {
-    const entries = params.block_palette || params.block_properties || [];
-    for (let i = 0; i < entries.length; i++) {
-      const name = (entries[i].name || '').replace('minecraft:', '');
-      this._palette.set(i, name || 'unknown');
+    const entries = params.block_properties || [];
+    let added = 0;
+    for (const entry of entries) {
+      const name = (entry.name || '').replace('minecraft:', '');
+      if (!name) continue;
+      // Custom blocks get runtime IDs after the standard palette
+      const rid = this._palette.size;
+      this._palette.set(rid, name);
+      added++;
     }
-    if (this._palette.size > 0) {
-      this._ready = true;
-      console.log(`[block-cache] Loaded ${this._palette.size} block states.`);
+    if (added > 0) {
+      console.log(`[block-cache] Added ${added} custom blocks from start_game. Total: ${this._palette.size}.`);
     }
+    this._ready = true;
   }
 
   /**

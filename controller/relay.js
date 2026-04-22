@@ -91,7 +91,11 @@ class RelayAdapter {
       this._relay = new bedrock.Relay(relayOpts);
 
       this._relay.on('connect', (player) => {
-        console.log('[relay] Real client connected!');
+        console.log('[relay] Real client connected, waiting for upstream...');
+      });
+
+      this._relay.on('join', (player) => {
+        console.log('[relay] Upstream connected — relay fully active.');
         this._player = player;
         this._setupPacketListeners(player, trackingState);
         this._ready = true;
