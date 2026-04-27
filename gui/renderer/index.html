@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>SCAR Minecraft</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Draggable titlebar region -->
+  <header id="titlebar">
+    <span class="title">SCAR Minecraft</span>
+    <span id="header-status" class="status-badge idle">idle</span>
+  </header>
+
+  <main>
+    <!-- ═══════════════ CONNECTION PANEL ═══════════════ -->
+    <section class="panel" id="connection-panel">
+      <h2>Connection</h2>
+
+      <div class="form-row">
+        <label>Protocol</label>
+        <div class="btn-group" id="protocol-group">
+          <button class="toggle-btn active" data-value="bedrock">Bedrock</button>
+          <button class="toggle-btn" data-value="java">Java</button>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>Connect via</label>
+        <div class="btn-group" id="connect-type-group">
+          <button class="toggle-btn active" data-value="realm">Realm</button>
+          <button class="toggle-btn" data-value="server">Server</button>
+          <button class="toggle-btn" data-value="world">World</button>
+        </div>
+      </div>
+
+      <!-- Realm fields -->
+      <div class="form-row connect-fields" id="realm-fields">
+        <label for="realm-url">Realm Invite URL</label>
+        <input type="text" id="realm-url" placeholder="https://realms.gg/CODE">
+      </div>
+
+      <!-- Server fields -->
+      <div class="form-row connect-fields hidden" id="server-fields">
+        <label for="server-host">Server</label>
+        <div class="input-pair">
+          <input type="text" id="server-host" placeholder="play.example.com">
+          <input type="number" id="server-port" placeholder="19132" class="short">
+        </div>
+      </div>
+
+      <!-- World fields -->
+      <div class="form-row connect-fields hidden" id="world-fields">
+        <label for="world-select">World Save</label>
+        <div class="input-pair">
+          <select id="world-select"><option value="">Loading...</option></select>
+          <button id="world-refresh" class="icon-btn" title="Refresh">&#x21bb;</button>
+        </div>
+      </div>
+
+      <!-- Port config -->
+      <div class="form-row compact">
+        <label>Ports</label>
+        <div class="input-pair">
+          <div class="labeled-input">
+            <span>Listen</span>
+            <input type="number" id="listen-port" placeholder="auto">
+          </div>
+          <div class="labeled-input">
+            <span>Bridge</span>
+            <input type="number" id="bridge-port" value="3001">
+          </div>
+        </div>
+      </div>
+
+      <!-- Options -->
+      <div class="form-row options-row">
+        <label class="checkbox"><input type="checkbox" id="opt-stealth"> Stealth</label>
+        <label class="checkbox"><input type="checkbox" id="opt-keyboard"> Keyboard Fallback</label>
+        <label class="checkbox"><input type="checkbox" id="opt-online"> Online Mode</label>
+      </div>
+
+      <div class="form-row compact">
+        <div class="input-pair">
+          <div class="labeled-input">
+            <span>PvP Style</span>
+            <select id="pvp-style">
+              <option value="cooldown">Cooldown (1.9+)</option>
+              <option value="spam">Spam (1.8)</option>
+            </select>
+          </div>
+          <div class="labeled-input">
+            <span>Phase</span>
+            <select id="phase-select">
+              <option value="1">1 - Movement</option>
+              <option value="2">2 - Interact</option>
+              <option value="3" selected>3 - Combat</option>
+              <option value="4">4 - Macros</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Minecraft window detection -->
+      <div class="form-row">
+        <label>Minecraft Windows</label>
+        <div class="input-pair">
+          <span id="mc-windows-info" class="info-text">Not scanned</span>
+          <button id="detect-windows" class="small-btn">Detect</button>
+        </div>
+      </div>
+
+      <!-- Presets -->
+      <div class="form-row preset-row">
+        <select id="preset-select"><option value="">-- Presets --</option></select>
+        <button id="preset-save" class="small-btn">Save</button>
+        <button id="preset-delete" class="small-btn danger">Del</button>
+      </div>
+    </section>
+
+    <!-- ═══════════════ CONTROL BAR ═══════════════ -->
+    <section class="panel" id="control-panel">
+      <div class="control-row">
+        <div class="control-buttons">
+          <button id="btn-start-relay" class="action-btn primary">Start Relay</button>
+          <button id="btn-stop-relay" class="action-btn" disabled>Stop Relay</button>
+          <button id="btn-start-agent" class="action-btn primary" disabled>Start Agent</button>
+          <button id="btn-stop-agent" class="action-btn" disabled>Stop Agent</button>
+          <button id="btn-stop-all" class="action-btn danger" disabled>Stop All</button>
+        </div>
+
+        <div class="bot-toggle-container">
+          <span class="bot-label">BOT CONTROL</span>
+          <button id="bot-toggle" class="bot-toggle off" disabled>OFF</button>
+        </div>
+      </div>
+
+      <!-- Auto-launch -->
+      <div class="auto-launch-row">
+        <button id="btn-auto-launch" class="action-btn accent">Launch All</button>
+        <div id="launch-steps" class="launch-steps">
+          <span class="step" data-step="relay">Relay</span>
+          <span class="step-arrow">&rarr;</span>
+          <span class="step" data-step="client">Client</span>
+          <span class="step-arrow">&rarr;</span>
+          <span class="step" data-step="agent">Agent</span>
+          <span class="step-arrow">&rarr;</span>
+          <span class="step" data-step="bot">Bot ON</span>
+        </div>
+      </div>
+
+      <!-- Agent config -->
+      <details id="agent-config" class="agent-config">
+        <summary>Agent Settings</summary>
+        <div class="form-row compact">
+          <div class="input-pair">
+            <div class="labeled-input">
+              <span>Steps</span>
+              <input type="number" id="agent-steps" value="10000">
+            </div>
+            <div class="labeled-input">
+              <span>Transfer</span>
+              <div class="input-pair">
+                <input type="text" id="agent-transfer" placeholder="none">
+                <button id="agent-transfer-browse" class="icon-btn" title="Browse">...</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="form-row compact">
+          <div class="input-pair">
+            <div class="labeled-input">
+              <span>Save to</span>
+              <div class="input-pair">
+                <input type="text" id="agent-save" placeholder="none">
+                <button id="agent-save-browse" class="icon-btn" title="Browse">...</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="form-row options-row">
+          <label class="checkbox"><input type="checkbox" id="opt-observe"> Observe Only</label>
+          <label class="checkbox"><input type="checkbox" id="opt-screen-capture"> Screen Capture</label>
+          <label class="checkbox"><input type="checkbox" id="opt-factored"> Factored Actions</label>
+          <label class="checkbox"><input type="checkbox" id="opt-converge"> Until Converge</label>
+        </div>
+      </details>
+    </section>
+
+    <!-- ═══════════════ STATUS DASHBOARD ═══════════════ -->
+    <section class="panel" id="status-panel">
+      <div class="dashboard-grid">
+        <!-- Health & food -->
+        <div class="stat-group">
+          <div class="stat-bar">
+            <span class="stat-label">Health</span>
+            <div class="bar-track"><div class="bar-fill health" id="health-bar" style="width:100%"></div></div>
+            <span class="stat-value" id="health-value">--</span>
+          </div>
+          <div class="stat-bar">
+            <span class="stat-label">Food</span>
+            <div class="bar-track"><div class="bar-fill food" id="food-bar" style="width:100%"></div></div>
+            <span class="stat-value" id="food-value">--</span>
+          </div>
+        </div>
+
+        <!-- Position -->
+        <div class="stat-group">
+          <div class="stat-line"><span class="stat-label">Position</span> <span id="position-value" class="stat-value mono">--</span></div>
+          <div class="stat-line"><span class="stat-label">Yaw / Pitch</span> <span id="orientation-value" class="stat-value mono">--</span></div>
+          <div class="stat-line"><span class="stat-label">Time</span> <span id="time-value" class="stat-value">--</span></div>
+          <div class="stat-line"><span class="stat-label">Alive</span> <span id="alive-value" class="stat-value">--</span></div>
+        </div>
+
+        <!-- Entities -->
+        <div class="stat-group">
+          <h3>Nearby Entities</h3>
+          <div id="entity-list" class="entity-list"><span class="muted">No data</span></div>
+        </div>
+
+        <!-- Entity Radar -->
+        <div class="stat-group radar-group">
+          <h3>Radar</h3>
+          <canvas id="entity-radar" width="140" height="140"></canvas>
+        </div>
+
+        <!-- Hotbar -->
+        <div class="stat-group hotbar-group">
+          <h3>Hotbar</h3>
+          <div id="hotbar" class="hotbar">
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+            <div class="hotbar-slot empty">-</div>
+          </div>
+        </div>
+
+        <!-- Agent Stats -->
+        <div class="stat-group agent-stats-group">
+          <h3>Agent</h3>
+          <div class="agent-stats" id="agent-stats">
+            <div class="stat-line"><span class="stat-label">Step</span> <span id="stat-step" class="stat-value">--</span></div>
+            <div class="stat-line"><span class="stat-label">Vitality</span> <span id="stat-vitality" class="stat-value">--</span></div>
+            <div class="stat-line"><span class="stat-label">Surprise</span> <span id="stat-surprise" class="stat-value">--</span></div>
+            <div class="stat-line"><span class="stat-label">Patterns</span> <span id="stat-patterns" class="stat-value">--</span></div>
+            <div class="stat-line"><span class="stat-label">K / D</span> <span id="stat-kd" class="stat-value">--</span></div>
+            <div class="stat-line"><span class="stat-label">Urgency</span> <span id="stat-urgency" class="stat-value">--</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ LOG PANEL ═══════════════ -->
+    <section class="panel" id="log-panel">
+      <div class="log-header">
+        <div class="log-tabs">
+          <button class="log-tab active" data-filter="all">All</button>
+          <button class="log-tab" data-filter="controller">Controller</button>
+          <button class="log-tab" data-filter="python">Python</button>
+        </div>
+        <button id="log-clear" class="small-btn">Clear</button>
+      </div>
+      <div id="log-output" class="log-output"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -12,13 +12,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+neural = [
+    "torch>=2.0",
+]
 dev = [
     "pytest>=8.0",
+    "torch>=2.0",
 ]
 
 [project.scripts]
 fpi = "fpi.live.cli:main"
 scar-minecraft = "fpi.minecraft.runner:main"
+neural-train = "fpi.minecraft.neural_runner:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fpi"]

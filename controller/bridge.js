@@ -69,9 +69,21 @@ async function handleMessage(socket, rawMsg, adapter, trackingState, actionConfi
   }
 
   switch (msg.cmd) {
-    case 'get_state':
-      send(socket, { type: 'state', ...getState(adapter, trackingState) });
+    case 'get_state': {
+      const st = getState(adapter, trackingState);
+      // Log entity counts every ~100 requests
+      if (!trackingState._stateReqCount) trackingState._stateReqCount = 0;
+      trackingState._stateReqCount++;
+      if (trackingState._stateReqCount % 100 === 1) {
+        const h = st.entities?.hostiles?.length || 0;
+        const p = st.entities?.passives?.length || 0;
+        const pl = st.entities?.players?.length || 0;
+        const c = st.crowd || {};
+        console.log(`[bridge] Entities: ${h} hostile, ${p} passive, ${pl} player | crowd: ${c.hostile_count || 0}h ${c.passive_count || 0}p | total_tracked: ${adapter._entities?.size || '?'}`);
+      }
+      send(socket, { type: 'state', ...st });
       break;
+    }
 
     case 'action':
       try {
@@ -95,14 +107,31 @@ async function handleMessage(socket, rawMsg, adapter, trackingState, actionConfi
             trackingState, actionConfig,
           );
         } else {
+          // Pass macroArgs for GO_TO_COORDINATES (id 23)
+          if (msg.id >= 20 && msg.macroArgs) {
+            actionConfig._macroArgs = msg.macroArgs;
+          }
           await executeAction(adapter, msg.id, trackingState, actionConfig);
+          delete actionConfig._macroArgs;
         }
 
         await tryAutoEat(adapter, trackingState);
-        send(socket, { type: 'state', ...getState(adapter, trackingState) });
+
+        // Include macro_status if a macro-action was executed
+        const state = getState(adapter, trackingState);
+        if (trackingState.lastMacroStatus) {
+          state.macro_status = trackingState.lastMacroStatus;
+          trackingState.lastMacroStatus = null;
+        }
+        send(socket, { type: 'state', ...state });
       } catch (err) {
         try {
-          send(socket, { type: 'state', ...getState(adapter, trackingState) });
+          const state = getState(adapter, trackingState);
+          if (trackingState.lastMacroStatus) {
+            state.macro_status = trackingState.lastMacroStatus;
+            trackingState.lastMacroStatus = null;
+          }
+          send(socket, { type: 'state', ...state });
         } catch (_) {
           send(socket, { type: 'error', message: err.message });
         }
@@ -111,9 +140,13 @@ async function handleMessage(socket, rawMsg, adapter, trackingState, actionConfi
 
     case 'respawn':
       if (trackingState.pendingRespawn) {
-        try {
-          adapter.chat('/kill');
-        } catch (_) {}
+        if (typeof adapter.respawn === 'function') {
+          // Attach mode: click Respawn button
+          try { await adapter.respawn(); } catch (_) {}
+        } else {
+          // Relay mode: chat command
+          try { adapter.chat('/kill'); } catch (_) {}
+        }
         await sleep(3000);
         if (adapter.health > 0) {
           trackingState.pendingRespawn = false;

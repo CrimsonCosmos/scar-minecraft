@@ -13,12 +13,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 from collections import deque
 
 from ..agent.core import Agent
 from ..primitives.vitality import Vitality
-from .env import MinecraftEnv
+from .env import MinecraftEnv, apply_phase_bias
 
 
 class ConvergenceDetector:
@@ -82,6 +83,9 @@ def run_minecraft(
     factored: bool = False,
     save_path: str | None = None,
     observe_only: bool = False,
+    screen_capture: bool = False,
+    capture_region: tuple[int, int, int, int] | None = None,
+    vision_weights: str | None = None,
 ) -> None:
     """Run FPI agent in Minecraft.
 
@@ -99,7 +103,11 @@ def run_minecraft(
         until_converge: Run until convergence detected (ignores max_steps).
         transfer_path: Load pre-trained agent state from this pickle file.
     """
-    env = MinecraftEnv(host=host, port=port, phase=phase, factored=factored)
+    env = MinecraftEnv(
+        host=host, port=port, phase=phase, factored=factored,
+        screen_capture=screen_capture, capture_region=capture_region,
+        vision_weights=vision_weights,
+    )
 
     # Factored action space (168 actions): reduce lookahead depth to stay fast.
     lookahead_depth = 3 if factored else 5
@@ -160,6 +168,9 @@ def run_minecraft(
     obs = env.reset()
     print(f"[fpi-minecraft] Connected. Phase {phase}, {len(env.action_space)} actions.")
 
+    if screen_capture:
+        print("[fpi-minecraft] Screen capture enabled (84x84 grayscale @ 4 FPS).")
+
     if not observe_only:
         env.set_bot_control(True)
         print("[fpi-minecraft] Bot control enabled — agent is driving.")
@@ -170,117 +181,135 @@ def run_minecraft(
     else:
         print(f"[fpi-minecraft] Running for {max_steps} steps...")
 
+    # SIGTERM handler: raise KeyboardInterrupt so try/finally can save
+    def _sigterm_handler(signum, frame):
+        raise KeyboardInterrupt("SIGTERM received")
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     # First step: observe only, no action
     result = agent.step_with_action(obs, 0.0, None)
 
-    for step in range(1, effective_max):
-        # Respawn: reset vitality, keep all learned knowledge
-        if not agent.vitality.alive:
-            agent.vitality = Vitality(entropy_rate=0.001)
+    try:
+        for step in range(1, effective_max):
+            # Respawn: reset vitality, keep all learned knowledge
+            if not agent.vitality.alive:
+                agent.vitality = Vitality(entropy_rate=0.001)
 
-        # Decide
-        action = agent.select_action(env.action_space)
+            # Decide
+            action = agent.select_action(env.action_space)
 
-        # Act and observe (with error recovery)
-        try:
-            obs, energy_delta, done = env.step(action)
-        except Exception as exc:
-            print(f"[step {step}] Bridge error: {exc}. Reconnecting...")
-            import time
-            for retry in range(5):
-                try:
-                    time.sleep(3)
-                    obs = env.reset()
-                    energy_delta = -0.1  # Mild penalty for disruption
-                    print(f"[step {step}] Reconnected after {retry + 1} attempts.")
+            # Act and observe (with error recovery)
+            try:
+                obs, energy_delta, done = env.step(action)
+            except Exception as exc:
+                print(f"[step {step}] Bridge error: {exc}. Reconnecting...")
+                import time
+                for retry in range(5):
+                    try:
+                        time.sleep(3)
+                        obs = env.reset()
+                        energy_delta = -0.1  # Mild penalty for disruption
+                        print(f"[step {step}] Reconnected after {retry + 1} attempts.")
+                        break
+                    except Exception:
+                        pass
+                else:
+                    print("[fpi-minecraft] Reconnect failed after 5 attempts. Exiting.")
                     break
-                except Exception:
-                    pass
-            else:
-                print("[fpi-minecraft] Reconnect failed after 5 attempts. Exiting.")
-                break
-            continue
+                continue
 
-        # Learn
-        result = agent.step_with_action(obs, energy_delta, action)
+            # Learn
+            result = agent.step_with_action(obs, energy_delta, action)
 
-        # Consolidate: replay important episodes when safe
-        agent.consolidate()
+            # Consolidate: replay important episodes when safe
+            agent.consolidate()
 
-        # Periodic reporting
-        if step % report_interval == 0:
-            avg_surprise = agent.average_surprise
-            pattern_count = len(agent.world_model.memory.distinction.patterns)
-            assoc_count = agent.world_model.memory.association_count
+            # Phase-aware threshold bias (every 50 steps)
+            if step % 50 == 0:
+                apply_phase_bias(agent, env)
 
-            # Count valenced patterns
-            positive_valence = sum(
-                1 for pid in agent.valence._values
-                if agent.valence.get(pid) > 0.01
-            )
-            negative_valence = sum(
-                1 for pid in agent.valence._values
-                if agent.valence.get(pid) < -0.01
-            )
+            # Periodic reporting
+            if step % report_interval == 0:
+                avg_surprise = agent.average_surprise
+                pattern_count = len(agent.world_model.memory.distinction.patterns)
+                assoc_count = agent.world_model.memory.association_count
 
-            print(
-                f"[step {step:>6}] "
-                f"vitality={result.vitality:.3f}  "
-                f"surprise={result.surprise:.2f}  "
-                f"avg_surprise={avg_surprise:.3f}  "
-                f"patterns={pattern_count}  "
-                f"assocs={assoc_count}  "
-                f"valence=+{positive_valence}/-{negative_valence}  "
-                f"kills={env.kill_count}  "
-                f"deaths={env.death_count}  "
-                f"urgency={agent.vitality.urgency:.2f}"
-            )
+                # Count valenced patterns
+                positive_valence = sum(
+                    1 for pid in agent.valence._values
+                    if agent.valence.get(pid) > 0.01
+                )
+                negative_valence = sum(
+                    1 for pid in agent.valence._values
+                    if agent.valence.get(pid) < -0.01
+                )
 
-            # Check convergence
-            if convergence is not None:
-                converged = convergence.update(avg_surprise, env.kill_count, env.death_count)
-                if converged:
-                    print(
-                        f"\n[fpi-minecraft] CONVERGED at step {step}. "
-                        f"No improvement for {convergence.patience} steps."
-                    )
-                    break
+                print(
+                    f"[step {step:>6}] "
+                    f"vitality={result.vitality:.3f}  "
+                    f"surprise={result.surprise:.2f}  "
+                    f"avg_surprise={avg_surprise:.3f}  "
+                    f"patterns={pattern_count}  "
+                    f"assocs={assoc_count}  "
+                    f"valence=+{positive_valence}/-{negative_valence}  "
+                    f"kills={env.kill_count}  "
+                    f"deaths={env.death_count}  "
+                    f"urgency={agent.vitality.urgency:.2f}"
+                )
 
-    # Summary
-    print("\n[fpi-minecraft] Session complete.")
-    print(f"  Total steps: {env.step_count}")
-    print(f"  Deaths: {env.death_count}")
-    print(f"  Kills: {env.kill_count}")
-    print(f"  Kill/Death ratio: {env.kill_count / max(env.death_count, 1):.2f}")
-    print(f"  Patterns learned: {len(agent.world_model.memory.distinction.patterns)}")
-    print(f"  Average surprise: {agent.average_surprise:.4f}")
-    if convergence is not None:
-        print(f"  Best avg_surprise: {convergence._best_surprise:.4f}")
-        print(f"  Best K/D ratio: {convergence._best_kd:.2f}")
+                # Check convergence
+                if convergence is not None:
+                    converged = convergence.update(avg_surprise, env.kill_count, env.death_count)
+                    if converged:
+                        print(
+                            f"\n[fpi-minecraft] CONVERGED at step {step}. "
+                            f"No improvement for {convergence.patience} steps."
+                        )
+                        break
 
-    if save_path:
-        import pickle
-        print(f"[fpi-minecraft] Saving agent state to {save_path}...")
-        options_list = []
-        if agent._option_executor is not None:
-            options_list = agent._option_executor._options
-        saved = {
-            "world_model": agent.world_model,
-            "valence": agent.valence,
-            "options": options_list,
-        }
-        with open(save_path, "wb") as f:
-            pickle.dump(saved, f)
-        print("[fpi-minecraft] Saved.")
+    except KeyboardInterrupt:
+        print("\n[fpi-minecraft] Interrupted — saving before exit...")
 
-    if not observe_only:
-        try:
-            env.set_bot_control(False)
-            print("[fpi-minecraft] Bot control disabled.")
-        except Exception:
-            pass
+    finally:
+        # Summary
+        print("\n[fpi-minecraft] Session complete.")
+        print(f"  Total steps: {env.step_count}")
+        print(f"  Deaths: {env.death_count}")
+        print(f"  Kills: {env.kill_count}")
+        print(f"  Kill/Death ratio: {env.kill_count / max(env.death_count, 1):.2f}")
+        print(f"  Patterns learned: {len(agent.world_model.memory.distinction.patterns)}")
+        print(f"  Average surprise: {agent.average_surprise:.4f}")
+        if convergence is not None:
+            print(f"  Best avg_surprise: {convergence._best_surprise:.4f}")
+            print(f"  Best K/D ratio: {convergence._best_kd:.2f}")
 
-    env.close()
+        if save_path:
+            import pickle
+            print(f"[fpi-minecraft] Saving agent state to {save_path}...")
+            try:
+                options_list = []
+                if agent._option_executor is not None:
+                    options_list = agent._option_executor._options
+                saved = {
+                    "world_model": agent.world_model,
+                    "valence": agent.valence,
+                    "options": options_list,
+                }
+                with open(save_path, "wb") as f:
+                    pickle.dump(saved, f)
+                print(f"[fpi-minecraft] Saved to {save_path}")
+            except Exception as e:
+                print(f"[fpi-minecraft] ERROR saving: {e}")
+
+        if not observe_only:
+            try:
+                env.set_bot_control(False)
+                print("[fpi-minecraft] Bot control disabled.")
+            except Exception:
+                pass
+
+        env.close()
 
 
 def main() -> None:
@@ -291,7 +320,7 @@ def main() -> None:
     parser.add_argument("--host", default="localhost", help="Bridge host")
     parser.add_argument("--port", type=int, default=3001, help="Bridge port")
     parser.add_argument("--steps", type=int, default=10000, help="Max steps")
-    parser.add_argument("--phase", type=int, default=1, choices=[1, 2, 3], help="Action phase")
+    parser.add_argument("--phase", type=int, default=1, choices=[1, 2, 3, 4], help="Action phase")
     parser.add_argument("--report", type=int, default=50, help="Report interval")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
@@ -318,6 +347,18 @@ def main() -> None:
         "--observe-only", action="store_true",
         help="Watch user play without taking control (learn passively)",
     )
+    parser.add_argument(
+        "--screen-capture", action="store_true",
+        help="Enable 84x84 grayscale screen capture as vision input (requires mss, Pillow)",
+    )
+    parser.add_argument(
+        "--capture-region", type=str, default=None,
+        help="Screen capture region as 'x,y,width,height' (default: full primary monitor)",
+    )
+    parser.add_argument(
+        "--vision-weights", type=str, default=None,
+        help="Path to .npz file with pre-trained CNN vision weights",
+    )
 
     args = parser.parse_args()
 
@@ -338,23 +379,32 @@ def main() -> None:
         phase = cfg.get("phase", phase)
         print(f"[fpi-minecraft] Loaded config from {cfg_path}")
 
-    try:
-        run_minecraft(
-            host=host,
-            port=port,
-            max_steps=args.steps,
-            phase=phase,
-            report_interval=args.report,
-            seed=args.seed,
-            until_converge=args.until_converge,
-            transfer_path=args.transfer,
-            factored=args.factored,
-            save_path=args.save,
-            observe_only=args.observe_only,
-        )
-    except KeyboardInterrupt:
-        print("\n[fpi-minecraft] Interrupted.")
-        sys.exit(0)
+    # Parse capture region
+    capture_region = None
+    if args.capture_region:
+        parts = [int(x) for x in args.capture_region.split(",")]
+        if len(parts) == 4:
+            capture_region = tuple(parts)
+        else:
+            print("[fpi-minecraft] Invalid --capture-region format. Use 'x,y,width,height'.")
+            sys.exit(1)
+
+    run_minecraft(
+        host=host,
+        port=port,
+        max_steps=args.steps,
+        phase=phase,
+        report_interval=args.report,
+        seed=args.seed,
+        until_converge=args.until_converge,
+        transfer_path=args.transfer,
+        factored=args.factored,
+        save_path=args.save,
+        observe_only=args.observe_only,
+        screen_capture=args.screen_capture,
+        capture_region=capture_region,
+        vision_weights=args.vision_weights,
+    )
 
 
 if __name__ == "__main__":

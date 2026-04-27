@@ -160,6 +160,17 @@ class Distinction:
     _salience_window: int = 6
     _deviation_buffer: list[NDArray[np.float64]] = field(default_factory=list, repr=False)
 
+    # Adaptive threshold fields
+    _adaptive: bool = False
+    _threshold_min: float = 0.0
+    _threshold_max: float = 1.0
+    _adapt_interval: int = 100
+    _adapt_rate: float = 0.05
+    _obs_since_adapt: int = 0
+    _creation_count: int = 0
+    _match_sims: list[float] = field(default_factory=list, repr=False)
+    _active_in_window: set[int] = field(default_factory=set, repr=False)
+
     def advance_tick(self) -> None:
         """Advance the internal clock."""
         self._current_tick += 1
@@ -208,9 +219,19 @@ class Distinction:
                 if len(self._deviation_buffer) > self._salience_window:
                     self._deviation_buffer.pop(0)
             best_pattern.update_centroid(signal, tick=self._current_tick)
+            # Track for adaptive thresholds
+            if self._adaptive:
+                self._match_sims.append(best_sim)
+                self._active_in_window.add(best_pattern.pattern_id)
+                self._maybe_adapt_threshold()
             return best_pattern, best_sim
 
-        return self._create_pattern(signal), 1.0
+        # New pattern created
+        result = self._create_pattern(signal), 1.0
+        if self._adaptive:
+            self._creation_count += 1
+            self._maybe_adapt_threshold()
+        return result
 
     def find_closest(self, signal: Signal) -> tuple[Pattern, float] | None:
         """Find the closest pattern without creating or updating anything."""
@@ -251,6 +272,79 @@ class Distinction:
             self._last_evicted = None
             return result
         return []
+
+    def enable_adaptive(
+        self,
+        threshold_min: float | None = None,
+        threshold_max: float | None = None,
+        adapt_interval: int = 100,
+        adapt_rate: float = 0.05,
+    ) -> None:
+        """Enable adaptive threshold adjustment.
+
+        Args:
+            threshold_min: Lower bound (default: initial - 0.15).
+            threshold_max: Upper bound (default: initial + 0.10).
+            adapt_interval: Observations between adaptations.
+            adapt_rate: EMA rate for threshold changes.
+        """
+        self._adaptive = True
+        self._threshold_min = (
+            threshold_min if threshold_min is not None
+            else max(0.0, self.similarity_threshold - 0.15)
+        )
+        self._threshold_max = (
+            threshold_max if threshold_max is not None
+            else min(1.0, self.similarity_threshold + 0.10)
+        )
+        self._adapt_interval = adapt_interval
+        self._adapt_rate = adapt_rate
+
+    def _maybe_adapt_threshold(self) -> None:
+        """Check utilization metrics and adjust threshold if interval reached."""
+        self._obs_since_adapt += 1
+        if self._obs_since_adapt < self._adapt_interval:
+            return
+
+        interval = self._adapt_interval
+
+        # Metrics
+        creation_rate = self._creation_count / interval
+        avg_match_sim = (
+            sum(self._match_sims) / len(self._match_sims)
+            if self._match_sims else 0.9
+        )
+        utilization = (
+            len(self._active_in_window) / len(self.patterns)
+            if self.patterns else 1.0
+        )
+
+        # Decision: compute target delta
+        delta = 0.0
+        if (creation_rate > 0.08
+                and self.max_patterns is not None
+                and len(self.patterns) >= self.max_patterns):
+            delta += 0.02   # too many new patterns at capacity → raise threshold
+        if utilization < 0.3:
+            delta += 0.01   # many dead patterns → raise threshold
+        if avg_match_sim > 0.97:
+            delta -= 0.02   # everything matches too easily → lower threshold
+        if avg_match_sim < 0.85:
+            delta += 0.01   # matches are marginal → raise threshold
+
+        # Apply with EMA and bounds
+        target = self.similarity_threshold + delta
+        self.similarity_threshold += self._adapt_rate * (target - self.similarity_threshold)
+        self.similarity_threshold = max(
+            self._threshold_min,
+            min(self._threshold_max, self.similarity_threshold),
+        )
+
+        # Reset counters
+        self._obs_since_adapt = 0
+        self._creation_count = 0
+        self._match_sims.clear()
+        self._active_in_window.clear()
 
     def _evict_weakest(self) -> int:
         """Evict the least-fit pattern. Returns the evicted pattern_id."""

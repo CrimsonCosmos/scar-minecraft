@@ -1,0 +1,172 @@
+{
+  "_comment": "Golden state fixture — cross-language contract between state.js and encoder.py. Both JS and Python tests validate against this file. Update here when adding new fields.",
+
+  "health": 16.0,
+  "food": 18.0,
+  "food_saturation": 3.5,
+  "xp_level": 7,
+  "xp_points": 42,
+  "position": { "x": 105.3, "y": 72.0, "z": -204.8 },
+  "yaw": 1.2,
+  "pitch": -0.3,
+  "on_ground": true,
+  "is_in_water": false,
+  "is_raining": false,
+  "time_of_day": 13200,
+  "light_level": 12,
+  "altitude": 72.0,
+
+  "spatial": {
+    "body_clear": [1.0, 0.67, 1.0, 0.33],
+    "drop_depth": [0.0, 0.5, 0.0, 0.0],
+    "overhead": [1.0, 1.0, 0.0, 1.0],
+    "danger": [0.0, 0.1, 0.0, 0.0],
+    "composition": [0.55, 0.08, 0.92, 0.02],
+    "immediate": [1.0, 0.0, 0.0, 0.0]
+  },
+
+  "entities": {
+    "hostiles": [
+      {
+        "name": "zombie",
+        "distance": 6.2,
+        "bearing": { "sin": 0.42, "cos": 0.91 },
+        "speed": 1.7,
+        "approach": 0.6,
+        "facing_us": 0.85,
+        "health": 20,
+        "max_health": 20,
+        "flags": 0,
+        "hand_state": 0,
+        "is_baby": false,
+        "creeper_state": -1,
+        "creeper_charged": false
+      },
+      {
+        "name": "skeleton",
+        "distance": 14.5,
+        "bearing": { "sin": -0.31, "cos": 0.95 },
+        "speed": 0.0,
+        "approach": 0.0,
+        "facing_us": 0.72,
+        "health": 20,
+        "max_health": 20,
+        "flags": 0,
+        "hand_state": 1,
+        "is_baby": false,
+        "creeper_state": -1,
+        "creeper_charged": false
+      },
+      {
+        "name": "creeper",
+        "distance": 22.0,
+        "bearing": { "sin": 0.88, "cos": -0.47 },
+        "speed": 0.42,
+        "approach": -0.1,
+        "facing_us": 0.65,
+        "health": 20,
+        "max_health": 20,
+        "flags": 0,
+        "hand_state": 0,
+        "is_baby": false,
+        "creeper_state": -1,
+        "creeper_charged": false
+      }
+    ],
+    "passives": [
+      {
+        "name": "cow",
+        "distance": 8.0,
+        "speed": 0.5,
+        "facing_us": 0.3,
+        "health": 10,
+        "max_health": 10,
+        "flags": 0,
+        "hand_state": 0,
+        "is_baby": false,
+        "creeper_state": -1,
+        "creeper_charged": false
+      }
+    ],
+    "players": [
+      {
+        "name": "TestPlayer",
+        "distance": 12.3,
+        "bearing": { "sin": -0.65, "cos": 0.76 },
+        "speed": 2.24,
+        "approach": 0.3,
+        "facing_us": 0.35,
+        "equipment_tier": 0.6,
+        "health": 18,
+        "max_health": 20,
+        "flags": 8,
+        "hand_state": 0,
+        "is_baby": false,
+        "creeper_state": -1,
+        "creeper_charged": false
+      }
+    ]
+  },
+
+  "crowd": {
+    "quadrant_density": [0.02, 0.05, 0.0, 0.0],
+    "hostile_count": 3,
+    "hostile_avg_dist": 14.23,
+    "hostile_near": 1,
+    "passive_count": 1,
+    "player_count": 1,
+    "threat_direction": { "sin": 0.55, "cos": 0.84, "magnitude": 0.3 },
+    "attacker_dist": 6.2,
+    "attacker_bearing": { "sin": 0.42, "cos": 0.91 },
+    "under_attack": 0.0
+  },
+
+  "inventory": {
+    "slots_used": 5,
+    "selected_slot": 0,
+    "hotbar": [
+      { "category": 1, "tier": 0.6, "durability": 0.85, "count": 1, "max_stack": 1 },
+      { "category": 2, "tier": 0.4, "durability": 0.5, "count": 1, "max_stack": 1 },
+      { "category": 6, "tier": 0.0, "durability": 1.0, "count": 32, "max_stack": 64 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+
+  "alive": true,
+  "hit_landed": false,
+  "player_hit_landed": false,
+  "kills": 0,
+  "attack_cooldown": 5,
+
+  "bot_control_active": false,
+  "user_active": true,
+  "is_using_item": false,
+
+  "self_velocity": { "x": 2.1, "y": -0.08, "z": 1.5 },
+  "health_delta": -2.0,
+  "food_delta": 0.0,
+  "ticks_airborne": 0,
+  "self_effects": { "speed": 0, "strength": 0, "resistance": 0, "regeneration": 0 },
+  "incoming_projectile": {
+    "name": "arrow",
+    "distance": 18.5,
+    "speed": 12.0,
+    "bearing": { "sin": -0.3, "cos": 0.95 }
+  },
+  "self_armor_tier": 0.6,
+  "is_thundering": false,
+  "nearest_hostile_accel": 0.12,
+  "nearest_player_armor": 0.5,
+  "height_vs_hostile": 1.5,
+  "height_vs_player": -0.3,
+  "combat_hits_5s": 3,
+  "combat_damage_5s": 4.5,
+  "time_since_hit": 1.2,
+  "kill_streak": 1,
+  "strafing": 0.8
+}

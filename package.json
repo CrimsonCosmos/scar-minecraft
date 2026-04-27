@@ -1,14 +1,58 @@
 {
   "name": "scar-minecraft",
   "version": "0.1.0",
-  "description": "FPI agent controlling a real Minecraft Bedrock client via bedrock-protocol Relay",
-  "main": "controller/main.js",
+  "description": "FPI agent controlling a real Minecraft client via protocol Relay (Bedrock + Java)",
+  "main": "gui/main.js",
   "scripts": {
     "start": "node controller/main.js",
     "start:realm": "node controller/main.js --realm-invite",
-    "start:stealth": "node controller/main.js --stealth"
+    "start:stealth": "node controller/main.js --stealth",
+    "start:java": "node controller/main.js --protocol java",
+    "gui": "electron gui/main.js",
+    "build": "electron-builder --mac",
+    "build:dir": "electron-builder --mac --dir",
+    "deploy": "npm run build && rm -rf \"$HOME/Desktop/SCAR Minecraft.app\" && cp -R \"dist/mac-arm64/SCAR Minecraft.app\" \"$HOME/Desktop/SCAR Minecraft.app\" && echo '✓ Deployed to Desktop'",
+    "test:protocol": "node --test tests/test_protocol.js",
+    "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
-    "bedrock-protocol": "^3.55.0"
+    "@nut-tree-fork/nut-js": "^4.2.0",
+    "bedrock-protocol": "^3.55.0",
+    "minecraft-data": "^3.64.0",
+    "minecraft-protocol": "^1.47.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.scar.minecraft",
+    "productName": "SCAR Minecraft",
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [
+        "dmg",
+        "dir"
+      ],
+      "icon": "gui/icon.png",
+      "hardenedRuntime": true,
+      "entitlements": "gui/entitlements.mac.plist",
+      "entitlementsInherit": "gui/entitlements.mac.plist"
+    },
+    "files": [
+      "controller/**/*",
+      "gui/**/*",
+      "!node_modules/.cache"
+    ],
+    "extraResources": [
+      {
+        "from": "src",
+        "to": "src",
+        "filter": [
+          "**/*.py"
+        ]
+      }
+    ],
+    "asar": false
   }
 }

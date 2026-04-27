@@ -18,6 +18,8 @@
 const bedrock = require('bedrock-protocol');
 const { sleep, waitTicks } = require('./utils');
 const { BlockCache } = require('./block-cache');
+const { HumanTiming } = require('./stealth');
+const { BEDROCK_ENTITY_META } = require('./categories');
 
 class RelayAdapter {
   constructor(config) {
@@ -55,6 +57,11 @@ class RelayAdapter {
     // When false, real client's inputs pass through unmodified.
     this._botControlActive = false;
 
+    // Keyboard fallback (null unless --keyboard-fallback enabled)
+    this._keyboardFallback = null;
+    // True during keyboard fallback execution — suppression is lifted
+    this._kbFallbackActive = false;
+
     // Simulated control states (used when bot is active)
     this._controlStates = {
       forward: false, back: false, left: false, right: false,
@@ -64,8 +71,22 @@ class RelayAdapter {
     // Movement injection interval
     this._movementInterval = null;
 
+    // Active status effects (effect ID → {amplifier, duration, startTime})
+    this._activeEffects = new Map();
+
+    // Weather state
+    this._isRaining = false;
+    this._isThundering = false;
+
     // Biome (estimated)
     this._biome = 'plains';
+
+    // Human timing generator for movement tick jitter
+    this._humanTiming = new HumanTiming();
+
+    // Bot control transition state
+    this._transitionStart = 0;
+    this._transitionDurationMs = 0;
 
     // Crafting recipes (from crafting_data packet)
     // Map of recipe output name → { network_id, inputs: [{name, count}], outputs: [{name, count, network_id}] }
@@ -230,6 +251,9 @@ class RelayAdapter {
           height: 1.8,
           username: null,
           yaw: params.yaw || 0,
+          velocity: { x: 0, y: 0, z: 0 },
+          _prevPos: params.position ? { ...params.position } : null,
+          _lastMoveTime: Date.now(),
         });
         break;
 
@@ -244,6 +268,9 @@ class RelayAdapter {
           position: params.position ? { ...params.position } : null,
           height: 1.8,
           yaw: params.yaw || 0,
+          velocity: { x: 0, y: 0, z: 0 },
+          _prevPos: params.position ? { ...params.position } : null,
+          _lastMoveTime: Date.now(),
         });
         break;
 
@@ -251,6 +278,17 @@ class RelayAdapter {
       case 'move_entity': {
         const entity = this._entities.get(params.runtime_entity_id);
         if (entity && params.position) {
+          const now = Date.now();
+          const dt = (now - (entity._lastMoveTime || now)) / 1000;
+          if (entity._prevPos && dt >= 0.01 && dt < 5.0) {
+            entity.velocity = {
+              x: (params.position.x - entity._prevPos.x) / dt,
+              y: (params.position.y - entity._prevPos.y) / dt,
+              z: (params.position.z - entity._prevPos.z) / dt,
+            };
+          }
+          entity._prevPos = { ...params.position };
+          entity._lastMoveTime = now;
           entity.position = { ...params.position };
           if (params.yaw !== undefined) entity.yaw = params.yaw;
         }
@@ -301,14 +339,51 @@ class RelayAdapter {
         break;
 
       case 'entity_event':
-        if (params.runtime_entity_id === this._runtimeEntityId && params.event_id === 2) {
-          // Player took damage — knockback cooldown
-          trackingState.knockbackCooldown = 2;
-          if (this._botControlActive) {
-            this.clearControlStates();
+        if (params.event_id === 2) {
+          const rid = params.runtime_entity_id;
+          if (rid === this._runtimeEntityId) {
+            // Player took damage — knockback cooldown
+            trackingState.knockbackCooldown = 2;
+            if (this._botControlActive) {
+              this.clearControlStates();
+            }
+          } else if (this._lastItemReleaseTime &&
+                     Date.now() - this._lastItemReleaseTime < 3000 &&
+                     !trackingState.attackedEntities.has(rid)) {
+            // Non-self entity hurt within 3s of our projectile release — attribute as projectile hit
+            trackingState.projectileHitLanded = true;
+            trackingState.attackedEntities.add(rid);
+            const entity = this._entities.get(rid);
+            if (entity && entity.type === 'player') {
+              trackingState.projectilePlayerHitLanded = true;
+            }
           }
         }
         break;
+
+      case 'set_entity_data': {
+        const rid = params.runtime_entity_id;
+        const entity = this._entities.get(rid);
+        if (entity) {
+          for (const entry of (params.metadata || [])) {
+            switch (entry.key) {
+              case BEDROCK_ENTITY_META.FLAGS: {
+                const flags = BigInt(entry.value || 0);
+                entity._flags = Number(flags & 0xFFn);
+                entity._isBaby = !!(flags & (1n << 22n));
+                break;
+              }
+              case BEDROCK_ENTITY_META.HEALTH:
+                if (typeof entry.value === 'number') entity._health = entry.value;
+                break;
+              case BEDROCK_ENTITY_META.FUSE_LENGTH:
+                if (typeof entry.value === 'number') entity._creeperState = entry.value;
+                break;
+            }
+          }
+        }
+        break;
+      }
 
       case 'crafting_data':
         this._parseCraftingData(params);
@@ -332,6 +407,29 @@ class RelayAdapter {
           this._quickBarSlot = params.selected_hotbar_slot;
         }
         break;
+
+      case 'mob_effect': {
+        if (params.runtime_entity_id !== this._runtimeEntityId) break;
+        const eventId = params.event_id; // 1=add, 2=modify, 3=remove
+        if (eventId === 1 || eventId === 2) {
+          this._activeEffects.set(params.effect_id, {
+            amplifier: params.amplifier || 0,
+            duration: params.duration || 0,
+            startTime: Date.now(),
+          });
+        } else if (eventId === 3) {
+          this._activeEffects.delete(params.effect_id);
+        }
+        break;
+      }
+
+      case 'level_event':
+        // Bedrock weather events: 3001 = start rain, 3003 = stop rain, 3002 = start thunder, 3004 = stop thunder
+        if (params.event === 3001) this._isRaining = true;
+        else if (params.event === 3003) this._isRaining = false;
+        else if (params.event === 3002) this._isThundering = true;
+        else if (params.event === 3004) this._isThundering = false;
+        break;
     }
   }
 
@@ -341,7 +439,7 @@ class RelayAdapter {
    * so they don't conflict with injected actions.
    */
   _handleServerbound(name, params, descriptor, trackingState) {
-    if (!this._botControlActive) return; // Pass-through when user is in control
+    if (!this._botControlActive || this._kbFallbackActive) return; // Pass-through when user is in control or keyboard fallback active
 
     // Suppress real client movement when bot is driving
     const suppressedPackets = new Set([
@@ -353,6 +451,19 @@ class RelayAdapter {
     ]);
 
     if (suppressedPackets.has(name)) {
+      // During bot control transition, gradually increase suppression
+      // so the packet pattern change isn't instant
+      if (this._transitionStart > 0) {
+        const elapsed = Date.now() - this._transitionStart;
+        if (elapsed < this._transitionDurationMs) {
+          const progress = elapsed / this._transitionDurationMs;
+          // Smoothstep curve for natural ramp
+          const t = progress * progress * (3 - 2 * progress);
+          if (Math.random() > t) return; // Let this packet through
+        } else {
+          this._transitionStart = 0; // Transition complete
+        }
+      }
       descriptor.canceled = true;
     }
   }
@@ -374,7 +485,10 @@ class RelayAdapter {
    */
   enableBotControl() {
     this._botControlActive = true;
-    console.log('[relay] Bot control ENABLED — FPI agent driving.');
+    // Gradual transition: ramp suppression over 1.5-2.5s
+    this._transitionStart = Date.now();
+    this._transitionDurationMs = 1500 + Math.random() * 1000;
+    console.log('[relay] Bot control ENABLED — ramping up.');
   }
 
   /**
@@ -383,6 +497,7 @@ class RelayAdapter {
    */
   disableBotControl() {
     this._botControlActive = false;
+    this._transitionStart = 0;
     this.clearControlStates();
     console.log('[relay] Bot control DISABLED — user in control.');
   }
@@ -391,47 +506,80 @@ class RelayAdapter {
     return this._botControlActive;
   }
 
+  /**
+   * Set a KeyboardFallback instance for OS-level input when packet injection fails.
+   */
+  setKeyboardFallback(fb) {
+    this._keyboardFallback = fb;
+  }
+
   // ---- Movement injection (when bot is in control) ----
 
   _startMovementLoop() {
-    this._movementInterval = setInterval(() => {
-      if (!this._player || !this._ready || !this._botControlActive) return;
+    this._movementLoopActive = true;
 
-      let inputFlags = 0;
-      if (this._controlStates.forward) inputFlags |= (1 << 0);
-      if (this._controlStates.back) inputFlags |= (1 << 1);
-      if (this._controlStates.left) inputFlags |= (1 << 2);
-      if (this._controlStates.right) inputFlags |= (1 << 3);
-      if (this._controlStates.jump) inputFlags |= (1 << 4);
-      if (this._controlStates.sneak) inputFlags |= (1 << 5);
-      if (this._controlStates.sprint) inputFlags |= (1 << 6);
+    const tick = () => {
+      if (!this._movementLoopActive) return;
 
-      if (inputFlags === 0) return;
+      if (this._player && this._ready && this._botControlActive) {
+        let inputFlags = 0;
+        if (this._controlStates.forward) inputFlags |= (1 << 0);
+        if (this._controlStates.back) inputFlags |= (1 << 1);
+        if (this._controlStates.left) inputFlags |= (1 << 2);
+        if (this._controlStates.right) inputFlags |= (1 << 3);
+        if (this._controlStates.jump) inputFlags |= (1 << 4);
+        if (this._controlStates.sneak) inputFlags |= (1 << 5);
+        if (this._controlStates.sprint) inputFlags |= (1 << 6);
 
-      try {
-        // Inject movement to the SERVER (upstream) as if the real client sent it
-        this._player.upstream.queue('player_auth_input', {
-          pitch: this._pitch,
-          yaw: this._yaw,
-          position: { x: this._position.x, y: this._position.y, z: this._position.z },
-          move_vector: {
-            x: (this._controlStates.right ? 1 : 0) - (this._controlStates.left ? 1 : 0),
-            z: (this._controlStates.forward ? 1 : 0) - (this._controlStates.back ? 1 : 0),
-          },
-          head_yaw: this._yaw,
-          input_data: inputFlags,
-          input_mode: 1,
-          play_mode: 0,
-          tick: BigInt(Date.now()),
-        });
-      } catch (_) {}
-    }, 50); // 20 TPS
+        if (inputFlags !== 0) {
+          try {
+            this._player.upstream.queue('player_auth_input', {
+              pitch: this._pitch,
+              yaw: this._yaw,
+              position: { x: this._position.x, y: this._position.y, z: this._position.z },
+              move_vector: {
+                x: (this._controlStates.right ? 1 : 0) - (this._controlStates.left ? 1 : 0),
+                z: (this._controlStates.forward ? 1 : 0) - (this._controlStates.back ? 1 : 0),
+              },
+              head_yaw: this._yaw,
+              input_data: inputFlags,
+              input_mode: 1,
+              play_mode: 0,
+              tick: BigInt(Date.now()),
+            });
+          } catch (e) {
+            if (this._keyboardFallback) {
+              console.warn('[relay] Movement packet failed, keyboard fallback for tick.');
+              this._kbFallbackActive = true;
+              const fb = this._keyboardFallback;
+              const states = { ...this._controlStates };
+              Promise.resolve().then(async () => {
+                try {
+                  for (const [key, val] of Object.entries(states)) {
+                    await fb.setControlState(key, val);
+                  }
+                } finally {
+                  this._kbFallbackActive = false;
+                }
+              });
+            }
+          }
+        }
+      }
+
+      // Variable tick interval: 38-65ms instead of fixed 50ms
+      const nextMs = this._humanTiming.nextMovementTick();
+      this._movementTimeout = setTimeout(tick, nextMs);
+    };
+
+    tick();
   }
 
   _stopMovementLoop() {
-    if (this._movementInterval) {
-      clearInterval(this._movementInterval);
-      this._movementInterval = null;
+    this._movementLoopActive = false;
+    if (this._movementTimeout) {
+      clearTimeout(this._movementTimeout);
+      this._movementTimeout = null;
     }
   }
 
@@ -466,7 +614,9 @@ class RelayAdapter {
   get pitch() { return this._pitch; }
   get onGround() { return this._onGround; }
   get isInWater() { return this._isInWater; }
-  get isRaining() { return false; }
+  get isRaining() { return this._isRaining; }
+  get isThundering() { return this._isThundering; }
+  get activeEffects() { return this._activeEffects; }
   get timeOfDay() { return this._timeOfDay; }
   get xpLevel() { return this._xpLevel; }
   get xpPoints() { return this._xpPoints; }
@@ -519,7 +669,15 @@ class RelayAdapter {
   }
 
   async attack(entity) {
-    if (!this._player) return;
+    if (!this._player) {
+      if (this._keyboardFallback) {
+        console.warn('[relay] No player connection, keyboard fallback for attack.');
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.attack(); }
+        finally { this._kbFallbackActive = false; }
+      }
+      return;
+    }
     try {
       // Inject attack packet upstream to server
       this._player.upstream.queue('inventory_transaction', {
@@ -539,6 +697,12 @@ class RelayAdapter {
       });
     } catch (e) {
       console.error('[relay] Attack failed:', e.message);
+      if (this._keyboardFallback) {
+        console.warn('[relay] Packet injection failed, keyboard fallback for attack.');
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.attack(); }
+        finally { this._kbFallbackActive = false; }
+      }
     }
   }
 
@@ -556,18 +720,39 @@ class RelayAdapter {
     this._pitch = pitch;
   }
 
-  swingArm() {
-    if (!this._player) return;
+  async swingArm() {
+    if (!this._player) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.swingArm(); }
+        finally { this._kbFallbackActive = false; }
+      }
+      return;
+    }
     try {
       this._player.upstream.queue('animate', {
         action_id: 1,
         runtime_entity_id: this._runtimeEntityId,
       });
-    } catch (_) {}
+    } catch (e) {
+      if (this._keyboardFallback) {
+        console.warn('[relay] Packet injection failed, keyboard fallback for swingArm.');
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.swingArm(); }
+        finally { this._kbFallbackActive = false; }
+      }
+    }
   }
 
   async activateItem() {
-    if (!this._player) return;
+    if (!this._player) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.activateItem(); }
+        finally { this._kbFallbackActive = false; }
+      }
+      return;
+    }
     try {
       this._player.upstream.queue('inventory_transaction', {
         transaction: {
@@ -586,12 +771,91 @@ class RelayAdapter {
           },
         },
       });
-    } catch (_) {}
+    } catch (e) {
+      if (this._keyboardFallback) {
+        console.warn('[relay] Packet injection failed, keyboard fallback for activateItem.');
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.activateItem(); }
+        finally { this._kbFallbackActive = false; }
+      }
+    }
   }
 
-  setQuickBarSlot(slot) {
+  async pressUseItem() {
+    this._isUsingItem = true;
+    if (!this._player) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.pressUseItem(); }
+        finally { this._kbFallbackActive = false; }
+      }
+      return;
+    }
+    try {
+      this._player.upstream.queue('inventory_transaction', {
+        transaction: {
+          legacy: { type: 'none' },
+          transaction_type: 'item_use',
+          actions: [],
+          transaction_data: {
+            action_type: 1,
+            block_position: { x: 0, y: 0, z: 0 },
+            face: -1,
+            hotbar_slot: this._quickBarSlot,
+            held_item: { network_id: 0 },
+            player_pos: { x: this._position.x, y: this._position.y, z: this._position.z },
+            click_pos: { x: 0, y: 0, z: 0 },
+            block_runtime_id: 0,
+          },
+        },
+      });
+    } catch (e) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.pressUseItem(); }
+        finally { this._kbFallbackActive = false; }
+      }
+    }
+  }
+
+  async releaseUseItem() {
+    this._isUsingItem = false;
+    this._lastItemReleaseTime = Date.now();
+    if (!this._player) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.releaseUseItem(); }
+        finally { this._kbFallbackActive = false; }
+      }
+      return;
+    }
+    try {
+      this._player.upstream.queue('player_action', {
+        runtime_entity_id: this._runtimeEntityId,
+        action: 'stop_item_use',
+        position: { x: 0, y: 0, z: 0 },
+        result_position: { x: 0, y: 0, z: 0 },
+        face: 0,
+      });
+    } catch (e) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.releaseUseItem(); }
+        finally { this._kbFallbackActive = false; }
+      }
+    }
+  }
+
+  async setQuickBarSlot(slot) {
     this._quickBarSlot = slot;
-    if (!this._player) return;
+    if (!this._player) {
+      if (this._keyboardFallback) {
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.setQuickBarSlot(slot); }
+        finally { this._kbFallbackActive = false; }
+      }
+      return;
+    }
     try {
       // Find the item currently in the target slot
       const slotItem = this._inventory.find(i => i.slot === slot);
@@ -605,7 +869,14 @@ class RelayAdapter {
         selected_slot: slot,
         window_id: 0,
       });
-    } catch (_) {}
+    } catch (e) {
+      if (this._keyboardFallback) {
+        console.warn('[relay] Packet injection failed, keyboard fallback for setQuickBarSlot.');
+        this._kbFallbackActive = true;
+        try { await this._keyboardFallback.setQuickBarSlot(slot); }
+        finally { this._kbFallbackActive = false; }
+      }
+    }
   }
 
   chat(msg) {
@@ -618,6 +889,16 @@ class RelayAdapter {
         message: msg,
         xuid: '',
         platform_chat_id: '',
+      });
+    } catch (_) {}
+  }
+
+  respawn() {
+    if (!this._player) return;
+    try {
+      this._player.upstream.queue('respawn', {
+        state: 2,
+        runtime_entity_id: this._runtimeEntityId || 0n,
       });
     } catch (_) {}
   }

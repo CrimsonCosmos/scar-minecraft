@@ -19,17 +19,20 @@
 
 const { HOSTILE_MOBS, PASSIVE_MOBS } = require('./categories');
 const { sleep, waitTicks } = require('./utils');
+const { getEntityAABB, getEyePosition, getAABBDistance, isShielding } = require('./combat-utils');
 
 // Bedrock Realms-safe combat config
 const BEDROCK_COMBAT = {
   attackRange: 3.0,          // Bedrock reach (lower than Java 3.5)
   critRange: 2.5,            // Closer for crit reliability
-  // CPS limits: 8-10 is human-like, Realms kicks at ~12-15
-  minAttackIntervalMs: 105,  // ~9.5 CPS max (with jitter → effective 8-9 CPS)
-  maxAttackIntervalMs: 135,  // ~7.4 CPS min
+  // CPS limits: wider range mimics real human variance
+  // Realms kicks at ~12-15 CPS, so min interval stays >= 95ms (~10.5 CPS)
+  minAttackIntervalMs: 95,   // ~10.5 CPS hard floor (safe margin)
+  maxAttackIntervalMs: 195,  // ~5.1 CPS (slow end — humans vary widely)
   // Jump timing (natural Bedrock physics)
   jumpCycleTicks: 12,        // Full jump cycle: ~600ms (jump + land)
-  critWindowTicks: 4,        // Ticks after apex where crit registers (falling)
+  critWindowStartTick: 2,    // Earliest tick to attack after jump (rising)
+  critWindowEndTick: 5,      // Latest tick to attack (falling)
   // W-tap timing
   sprintCancelTicks: 2,      // 2 ticks release (safer than 1 for Bedrock)
   sprintReengageTicks: 2,    // 2 ticks to re-engage before hit
@@ -40,82 +43,25 @@ const BEDROCK_COMBAT = {
 
 /**
  * Get random attack delay within Realms-safe CPS range.
- * Adds human-like jitter so timing isn't perfectly mechanical.
+ * Uses sum-of-uniforms (triangular-ish) distribution that clusters around
+ * the center (~145ms / ~7 CPS) with natural tails, defeating statistical
+ * profiling that detects narrow uniform distributions.
  */
 function getAttackInterval() {
   const { minAttackIntervalMs, maxAttackIntervalMs } = BEDROCK_COMBAT;
-  // Uniform random in safe range + slight Gaussian-ish jitter
-  const base = minAttackIntervalMs + Math.random() * (maxAttackIntervalMs - minAttackIntervalMs);
-  const jitter = (Math.random() - 0.5) * 20; // ±10ms noise
-  return Math.max(minAttackIntervalMs, Math.round(base + jitter));
+  // Sum of 2 uniforms → triangular distribution (clusters around center)
+  const u1 = Math.random();
+  const u2 = Math.random();
+  const t = (u1 + u2) / 2; // 0-1, peaked at 0.5
+  const base = minAttackIntervalMs + t * (maxAttackIntervalMs - minAttackIntervalMs);
+
+  // 4% chance of micro-pause (human hesitation / repositioning)
+  const pause = (Math.random() < 0.04) ? 30 + Math.random() * 80 : 0;
+
+  return Math.max(minAttackIntervalMs, Math.round(base + pause));
 }
 
-/**
- * Get AABB for a Bedrock entity.
- * Same as Java version but used with Bedrock's 3.0 range.
- */
-function getEntityAABB(entity) {
-  const pos = entity.position;
-  if (!pos) return null;
-  const width = entity.width || 0.6;
-  const height = entity.height || 1.8;
-  const halfWidth = width / 2;
-  return {
-    minX: pos.x - halfWidth,
-    minY: pos.y,
-    minZ: pos.z - halfWidth,
-    maxX: pos.x + halfWidth,
-    maxY: pos.y + height,
-    maxZ: pos.z + halfWidth,
-  };
-}
-
-/**
- * Get eye position for look-at targeting.
- */
-function getEyePosition(entity) {
-  const pos = entity.position;
-  if (!pos) return null;
-  const eyeHeight = entity.type === 'player' ? 1.62 : (entity.height || 1.8) * 0.85;
-  return { x: pos.x, y: pos.y + eyeHeight, z: pos.z };
-}
-
-/**
- * Distance from bot to nearest point on entity AABB.
- */
-function getAABBDistance(adapter, entity) {
-  if (!entity || !entity.position) return Infinity;
-  const botPos = adapter.position;
-  const eyePos = { x: botPos.x, y: botPos.y + 1.62, z: botPos.z };
-  const aabb = getEntityAABB(entity);
-  if (!aabb) return Infinity;
-
-  const cx = Math.max(aabb.minX, Math.min(eyePos.x, aabb.maxX));
-  const cy = Math.max(aabb.minY, Math.min(eyePos.y, aabb.maxY));
-  const cz = Math.max(aabb.minZ, Math.min(eyePos.z, aabb.maxZ));
-
-  const dx = eyePos.x - cx;
-  const dy = eyePos.y - cy;
-  const dz = eyePos.z - cz;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-/**
- * Check if target is shielding (same logic as Java, works on Bedrock 1.18.30+).
- */
-function isShielding(target) {
-  if (!target || !target.metadata) return false;
-  const handState = target.metadata[8];
-  if (typeof handState === 'number' && (handState & 0x01)) {
-    if (target.equipment && target.equipment[1]) {
-      const offhand = target.equipment[1];
-      if (offhand && offhand.name && offhand.name.includes('shield')) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
+// Combat geometry utils imported from combat-utils.js
 
 /**
  * Find nearest attackable entity within Bedrock's 3.0 block reach.
@@ -225,8 +171,10 @@ async function executeBedrockCritSpam(adapter, target, trackingState, tickRate) 
   await waitTicks(tickRate, 1);
   adapter.setControlState('jump', false);
 
-  // Wait for rising phase (2-3 ticks) — still counts as crit if not on ground
-  await waitTicks(tickRate, 3);
+  // Wait for airborne phase — vary between 2-4 ticks (not always the same)
+  const critWaitTicks = BEDROCK_COMBAT.critWindowStartTick +
+    Math.floor(Math.random() * (BEDROCK_COMBAT.critWindowEndTick - BEDROCK_COMBAT.critWindowStartTick + 1));
+  await waitTicks(tickRate, critWaitTicks);
 
   // Attack during airborne phase (= critical hit)
   const dist = getAABBDistance(adapter, target);

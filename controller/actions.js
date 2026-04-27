@@ -1,20 +1,35 @@
 /**
  * Action execution — all 20 discrete actions for Relay adapter.
  *
- * Bedrock-only (no Java path needed). Actions inject serverbound packets
- * through the Relay rather than using Mineflayer's API.
+ * Supports both Bedrock and Java protocols. Uses config.protocol to
+ * dispatch to the appropriate combat functions.
  *
- * The adapter interface is identical, so this is a simplified copy of
- * fpi-minecraft's actions.js with only the Bedrock code paths.
+ * The adapter interface is identical across protocols, so movement,
+ * look, and utility actions work unchanged. Only combat actions
+ * (11, 18, 19) and composite combat need protocol-specific dispatch.
  */
 
-const { HOSTILE_MOBS, PASSIVE_MOBS } = require('./categories');
+const { HOSTILE_MOBS, PASSIVE_MOBS, FOOD_NAMES } = require('./categories');
 const { sleep, waitTicks } = require('./utils');
 const {
   findNearestTargetBedrock, executeBedrockAttack,
   executeBedrockCritSpam, executeBedrockWTap, BEDROCK_COMBAT,
   getEyePosition,
 } = require('./bedrock-combat');
+
+// Lazy-load Java combat (only needed when protocol === 'java')
+let _javaCombat = null;
+function javaCombat() {
+  if (!_javaCombat) _javaCombat = require('./java-combat');
+  return _javaCombat;
+}
+
+// Lazy-load macro-actions (only needed for Phase 4)
+let _macroActions = null;
+function macroActions() {
+  if (!_macroActions) _macroActions = require('./macro-actions');
+  return _macroActions;
+}
 
 async function executeAction(adapter, actionId, trackingState, config) {
   const { tickRate = 0, actionDurationTicks = 4 } = config;
@@ -25,7 +40,7 @@ async function executeAction(adapter, actionId, trackingState, config) {
   }
 
   if (stealth && stealth.shouldRandomIdle()) {
-    await waitTicks(tickRate, 2 + Math.floor(Math.random() * 4));
+    await sleep(stealth.getIdleDurationMs());
   }
 
   if (trackingState.knockbackCooldown > 0 && actionId <= 6) {
@@ -67,7 +82,7 @@ async function executeAction(adapter, actionId, trackingState, config) {
       adapter.setControlState('sprint', true);
       break;
     case 7: { // Look left 45 deg
-      const targetYaw = adapter.yaw + Math.PI / 4;
+      const targetYaw = adapter.yaw + 45;
       if (stealth) {
         const steps = stealth.getLookSteps(adapter.yaw, targetYaw);
         for (const yaw of steps) {
@@ -80,7 +95,7 @@ async function executeAction(adapter, actionId, trackingState, config) {
       break;
     }
     case 8: { // Look right 45 deg
-      const targetYaw = adapter.yaw - Math.PI / 4;
+      const targetYaw = adapter.yaw - 45;
       if (stealth) {
         const steps = stealth.getLookSteps(adapter.yaw, targetYaw);
         for (const yaw of steps) {
@@ -93,17 +108,27 @@ async function executeAction(adapter, actionId, trackingState, config) {
       break;
     }
     case 9: // Look up 30 deg
-      await adapter.look(adapter.yaw, Math.max(-Math.PI / 2, adapter.pitch - Math.PI / 6));
+      await adapter.look(adapter.yaw, Math.max(-90, adapter.pitch - 30));
       break;
     case 10: // Look down 30 deg
-      await adapter.look(adapter.yaw, Math.min(Math.PI / 2, adapter.pitch + Math.PI / 6));
+      await adapter.look(adapter.yaw, Math.min(90, adapter.pitch + 30));
       break;
     case 11: { // Attack nearest entity
-      const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange);
-      if (target) {
-        await executeBedrockAttack(adapter, target, trackingState, tickRate);
+      if (config.protocol === 'java') {
+        const jc = javaCombat();
+        const target = jc.findNearestTargetJava(adapter, jc.JAVA_COMBAT.attackRange);
+        if (target) {
+          await jc.executeJavaAttack(adapter, target, trackingState, tickRate, config.pvpStyle);
+        } else {
+          try { adapter.swingArm(); } catch (_) {}
+        }
       } else {
-        try { adapter.swingArm(); } catch (_) {}
+        const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange);
+        if (target) {
+          await executeBedrockAttack(adapter, target, trackingState, tickRate);
+        } else {
+          try { adapter.swingArm(); } catch (_) {}
+        }
       }
       break;
     }
@@ -132,37 +157,77 @@ async function executeAction(adapter, actionId, trackingState, config) {
       break;
     }
     case 18: { // Sprint-crit
-      const critTarget = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.critRange + 1.0);
-      if (critTarget) {
-        await executeBedrockCritSpam(adapter, critTarget, trackingState, tickRate);
+      if (config.protocol === 'java') {
+        const jc = javaCombat();
+        const critTarget = jc.findNearestTargetJava(adapter, jc.JAVA_COMBAT.critRange + 1.0);
+        if (critTarget) {
+          await jc.executeJavaCritSpam(adapter, critTarget, trackingState, tickRate, config.pvpStyle);
+        } else {
+          adapter.setControlState('forward', true);
+          adapter.setControlState('sprint', true);
+          adapter.setControlState('jump', true);
+          await waitTicks(tickRate, 2);
+          adapter.setControlState('jump', false);
+          await waitTicks(tickRate, durationTicks);
+          adapter.clearControlStates();
+        }
       } else {
-        adapter.setControlState('forward', true);
-        adapter.setControlState('sprint', true);
-        adapter.setControlState('jump', true);
-        await waitTicks(tickRate, 2);
-        adapter.setControlState('jump', false);
-        await waitTicks(tickRate, durationTicks);
-        adapter.clearControlStates();
+        const critTarget = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.critRange + 1.0);
+        if (critTarget) {
+          await executeBedrockCritSpam(adapter, critTarget, trackingState, tickRate);
+        } else {
+          adapter.setControlState('forward', true);
+          adapter.setControlState('sprint', true);
+          adapter.setControlState('jump', true);
+          await waitTicks(tickRate, 2);
+          adapter.setControlState('jump', false);
+          await waitTicks(tickRate, durationTicks);
+          adapter.clearControlStates();
+        }
       }
       break;
     }
     case 19: { // W-tap
-      const wtapTarget = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange + 0.5);
-      if (wtapTarget) {
-        await executeBedrockWTap(adapter, wtapTarget, trackingState, tickRate);
+      if (config.protocol === 'java') {
+        const jc = javaCombat();
+        const wtapTarget = jc.findNearestTargetJava(adapter, jc.JAVA_COMBAT.attackRange + 0.5);
+        if (wtapTarget) {
+          await jc.executeJavaWTap(adapter, wtapTarget, trackingState, tickRate, config.pvpStyle);
+        } else {
+          adapter.setControlState('forward', false);
+          adapter.setControlState('sprint', false);
+          await waitTicks(tickRate, 1);
+          adapter.setControlState('forward', true);
+          adapter.setControlState('sprint', true);
+          await waitTicks(tickRate, durationTicks);
+          adapter.clearControlStates();
+        }
       } else {
-        adapter.setControlState('forward', false);
-        adapter.setControlState('sprint', false);
-        await waitTicks(tickRate, 2);
-        adapter.setControlState('forward', true);
-        adapter.setControlState('sprint', true);
-        await waitTicks(tickRate, durationTicks);
-        adapter.clearControlStates();
+        const wtapTarget = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange + 0.5);
+        if (wtapTarget) {
+          await executeBedrockWTap(adapter, wtapTarget, trackingState, tickRate);
+        } else {
+          adapter.setControlState('forward', false);
+          adapter.setControlState('sprint', false);
+          await waitTicks(tickRate, 2);
+          adapter.setControlState('forward', true);
+          adapter.setControlState('sprint', true);
+          await waitTicks(tickRate, durationTicks);
+          adapter.clearControlStates();
+        }
       }
       break;
     }
     default:
-      console.warn(`[actions] Unknown action: ${actionId}`);
+      // Macro-actions: IDs 20+
+      if (actionId >= 20 && actionId <= 24) {
+        const ma = macroActions();
+        const macroArgs = config._macroArgs || {};
+        const status = await ma.executeMacro(actionId, adapter, trackingState, config, macroArgs);
+        trackingState.lastMacroStatus = status;
+      } else {
+        console.warn(`[actions] Unknown action: ${actionId}`);
+      }
   }
 
   if (actionId <= 6) {
@@ -194,19 +259,27 @@ function _applyMovement(adapter, movement) {
   }
 }
 
-async function _executeLookAxis(adapter, look, stealth) {
+async function _executeLookAxis(adapter, look, stealth, config) {
   switch (look) {
     case 0: break;
     case 1: { // track target
-      const target = findNearestTargetBedrock(adapter, 16);
+      let target;
+      let eyePosFn = getEyePosition;
+      if (config && config.protocol === 'java') {
+        const jc = javaCombat();
+        target = jc.findNearestTargetJava(adapter, 16);
+        eyePosFn = jc.getEyePosition;
+      } else {
+        target = findNearestTargetBedrock(adapter, 16);
+      }
       if (target) {
-        const eyePos = getEyePosition(target);
+        const eyePos = eyePosFn(target);
         if (eyePos) await adapter.lookAt(eyePos);
       }
       break;
     }
     case 2: { // look left
-      const targetYaw = adapter.yaw + Math.PI / 4;
+      const targetYaw = adapter.yaw + 45;
       if (stealth) {
         for (const yaw of stealth.getLookSteps(adapter.yaw, targetYaw)) {
           await adapter.look(yaw, adapter.pitch);
@@ -218,7 +291,7 @@ async function _executeLookAxis(adapter, look, stealth) {
       break;
     }
     case 3: { // look right
-      const targetYaw = adapter.yaw - Math.PI / 4;
+      const targetYaw = adapter.yaw - 45;
       if (stealth) {
         for (const yaw of stealth.getLookSteps(adapter.yaw, targetYaw)) {
           await adapter.look(yaw, adapter.pitch);
@@ -230,20 +303,30 @@ async function _executeLookAxis(adapter, look, stealth) {
       break;
     }
     case 4:
-      await adapter.look(adapter.yaw, Math.max(-Math.PI / 2, adapter.pitch - Math.PI / 6));
+      await adapter.look(adapter.yaw, Math.max(-90, adapter.pitch - 30));
       break;
     case 5:
-      await adapter.look(adapter.yaw, Math.min(Math.PI / 2, adapter.pitch + Math.PI / 6));
+      await adapter.look(adapter.yaw, Math.min(90, adapter.pitch + 30));
       break;
   }
 }
 
-async function _executeAttackAxis(adapter, trackingState, tickRate) {
-  const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange);
-  if (target) {
-    await executeBedrockAttack(adapter, target, trackingState, tickRate);
+async function _executeAttackAxis(adapter, trackingState, tickRate, config) {
+  if (config && config.protocol === 'java') {
+    const jc = javaCombat();
+    const target = jc.findNearestTargetJava(adapter, jc.JAVA_COMBAT.attackRange);
+    if (target) {
+      await jc.executeJavaAttack(adapter, target, trackingState, tickRate, config.pvpStyle);
+    } else {
+      try { adapter.swingArm(); } catch (_) {}
+    }
   } else {
-    try { adapter.swingArm(); } catch (_) {}
+    const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange);
+    if (target) {
+      await executeBedrockAttack(adapter, target, trackingState, tickRate);
+    } else {
+      try { adapter.swingArm(); } catch (_) {}
+    }
   }
 }
 
@@ -253,7 +336,7 @@ async function executeCompositeAction(adapter, movement, look, combat, trackingS
 
   if (stealth) await stealth.preActionDelay();
   if (stealth && stealth.shouldRandomIdle()) {
-    await waitTicks(tickRate, 2 + Math.floor(Math.random() * 4));
+    await sleep(stealth.getIdleDurationMs());
   }
 
   const durationTicks = stealth ? stealth.getActionTicks(actionDurationTicks) : actionDurationTicks;
@@ -266,41 +349,73 @@ async function executeCompositeAction(adapter, movement, look, combat, trackingS
   // Motor program overrides (crit/wtap consume whole tick)
   if (combat === 2) {
     adapter.clearControlStates();
-    const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.critRange + 1.0);
-    if (target) {
-      await executeBedrockCritSpam(adapter, target, trackingState, tickRate);
+    if (config.protocol === 'java') {
+      const jc = javaCombat();
+      const target = jc.findNearestTargetJava(adapter, jc.JAVA_COMBAT.critRange + 1.0);
+      if (target) {
+        await jc.executeJavaCritSpam(adapter, target, trackingState, tickRate, config.pvpStyle);
+      } else {
+        adapter.setControlState('forward', true);
+        adapter.setControlState('sprint', true);
+        adapter.setControlState('jump', true);
+        await waitTicks(tickRate, 2);
+        adapter.setControlState('jump', false);
+        await waitTicks(tickRate, durationTicks);
+        adapter.clearControlStates();
+      }
     } else {
-      adapter.setControlState('forward', true);
-      adapter.setControlState('sprint', true);
-      adapter.setControlState('jump', true);
-      await waitTicks(tickRate, 2);
-      adapter.setControlState('jump', false);
-      await waitTicks(tickRate, durationTicks);
-      adapter.clearControlStates();
+      const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.critRange + 1.0);
+      if (target) {
+        await executeBedrockCritSpam(adapter, target, trackingState, tickRate);
+      } else {
+        adapter.setControlState('forward', true);
+        adapter.setControlState('sprint', true);
+        adapter.setControlState('jump', true);
+        await waitTicks(tickRate, 2);
+        adapter.setControlState('jump', false);
+        await waitTicks(tickRate, durationTicks);
+        adapter.clearControlStates();
+      }
     }
-    await _executeLookAxis(adapter, look, stealth);
+    await _executeLookAxis(adapter, look, stealth, config);
     return;
   }
 
   if (combat === 3) {
     adapter.clearControlStates();
-    const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange + 0.5);
-    if (target) {
-      await executeBedrockWTap(adapter, target, trackingState, tickRate);
+    if (config.protocol === 'java') {
+      const jc = javaCombat();
+      const target = jc.findNearestTargetJava(adapter, jc.JAVA_COMBAT.attackRange + 0.5);
+      if (target) {
+        await jc.executeJavaWTap(adapter, target, trackingState, tickRate, config.pvpStyle);
+      } else {
+        adapter.setControlState('forward', false);
+        adapter.setControlState('sprint', false);
+        await waitTicks(tickRate, 1);
+        adapter.setControlState('forward', true);
+        adapter.setControlState('sprint', true);
+        await waitTicks(tickRate, durationTicks);
+        adapter.clearControlStates();
+      }
     } else {
-      adapter.setControlState('forward', false);
-      adapter.setControlState('sprint', false);
-      await waitTicks(tickRate, 2);
-      adapter.setControlState('forward', true);
-      adapter.setControlState('sprint', true);
-      await waitTicks(tickRate, durationTicks);
-      adapter.clearControlStates();
+      const target = findNearestTargetBedrock(adapter, BEDROCK_COMBAT.attackRange + 0.5);
+      if (target) {
+        await executeBedrockWTap(adapter, target, trackingState, tickRate);
+      } else {
+        adapter.setControlState('forward', false);
+        adapter.setControlState('sprint', false);
+        await waitTicks(tickRate, 2);
+        adapter.setControlState('forward', true);
+        adapter.setControlState('sprint', true);
+        await waitTicks(tickRate, durationTicks);
+        adapter.clearControlStates();
+      }
     }
-    await _executeLookAxis(adapter, look, stealth);
+    await _executeLookAxis(adapter, look, stealth, config);
     return;
   }
 
-  // Parallel: movement + look + attack
+  // Parallel: movement + look + combat primitive
   if (!knockbackActive) {
     _applyMovement(adapter, movement);
   } else {
@@ -310,7 +425,17 @@ async function executeCompositeAction(adapter, movement, look, combat, trackingS
   await _executeLookAxis(adapter, look, stealth);
 
   if (combat === 1) {
-    await _executeAttackAxis(adapter, trackingState, tickRate);
+    await _executeAttackAxis(adapter, trackingState, tickRate, config);
+  } else if (combat === 4) {
+    // use_start: press and hold right-click (charge bow, raise shield, eat)
+    try { await adapter.pressUseItem(); } catch (_) {}
+  } else if (combat === 5) {
+    // use_stop: release right-click (fire bow, lower shield)
+    try { await adapter.releaseUseItem(); } catch (_) {}
+  } else if (combat === 6) {
+    // hotbar_next: cycle to next hotbar slot
+    const current = adapter.quickBarSlot;
+    adapter.setQuickBarSlot((current + 1) % 9);
   }
 
   await waitTicks(tickRate, durationTicks);
@@ -319,16 +444,8 @@ async function executeCompositeAction(adapter, movement, look, combat, trackingS
 
 // ---- Auto-eat ----
 
-const FOOD_ITEMS = new Set([
-  'apple', 'golden_apple', 'enchanted_golden_apple', 'bread',
-  'cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken',
-  'cooked_rabbit', 'cooked_cod', 'cooked_salmon', 'baked_potato',
-  'beetroot', 'carrot', 'golden_carrot', 'melon_slice', 'sweet_berries',
-  'glow_berries', 'cookie', 'pumpkin_pie', 'mushroom_stew',
-  'rabbit_stew', 'beetroot_soup', 'suspicious_stew',
-  'dried_kelp', 'beef', 'porkchop', 'mutton', 'chicken', 'rabbit',
-  'cod', 'salmon', 'potato', 'rotten_flesh', 'spider_eye',
-]);
+// Food items — single source of truth in categories.js
+const FOOD_ITEMS = FOOD_NAMES;
 
 async function tryAutoEat(adapter, trackingState) {
   if (adapter.food >= 2) return false;

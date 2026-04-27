@@ -34,19 +34,28 @@ CRAFT_TOOL = 17
 SPRINT_CRIT = 18  # Sprint + jump + attack at fall peak (critical hit)
 W_TAP = 19        # Release forward → attack → re-engage (extra knockback)
 
+# Phase 4: Macro-actions (hierarchical — multi-tick, A* pathfinding)
+APPROACH_TARGET = 20    # A* pathfind to nearest hostile/player, stop at 3 blocks
+FLEE = 21               # Sprint away from nearest threat
+MINE_BLOCK_BELOW = 22   # Look down + break block at feet
+GO_TO_COORDINATES = 23  # A* to explicit coords (bridge-only, not in FPI action space)
+APPROACH_PASSIVE = 24   # A* pathfind to nearest passive mob, stop at 3 blocks
+
 PHASE_1_ACTIONS: list[int] = list(range(13))
 PHASE_2_ACTIONS: list[int] = list(range(18))
 PHASE_3_ACTIONS: list[int] = list(range(20))
+# Phase 4 = all primitives + macro-actions (excluding GO_TO_COORDINATES = bridge-only)
+PHASE_4_ACTIONS: list[int] = list(range(20)) + [20, 21, 22, 24]
 
 # Factored action space: 3 independent axes executed in parallel.
 # Movement (7): none, forward, back, left, right, fwd+jump, fwd+sprint
 # Look (6):     none, track_target, look_left, look_right, look_up, look_down
-# Combat (4):   none, attack, crit, wtap
-# Encoding: flat_id = movement * 24 + look * 4 + combat
+# Combat (7):   none, attack, crit, wtap, use_start, use_stop, hotbar_next
+# Encoding: flat_id = movement * 42 + look * 7 + combat
 MOVEMENT_COUNT = 7
 LOOK_COUNT = 6
-COMBAT_COUNT = 4
-FACTORED_ACTION_COUNT = MOVEMENT_COUNT * LOOK_COUNT * COMBAT_COUNT  # 168
+COMBAT_COUNT = 7
+FACTORED_ACTION_COUNT = MOVEMENT_COUNT * LOOK_COUNT * COMBAT_COUNT  # 294
 FACTORED_ACTIONS: list[int] = list(range(FACTORED_ACTION_COUNT))
 
 
@@ -85,4 +94,9 @@ ACTION_NAMES: dict[int, str] = {
     CRAFT_TOOL: "craft_tool",
     SPRINT_CRIT: "sprint_crit",
     W_TAP: "w_tap",
+    APPROACH_TARGET: "approach_target",
+    FLEE: "flee",
+    MINE_BLOCK_BELOW: "mine_block_below",
+    GO_TO_COORDINATES: "go_to_coordinates",
+    APPROACH_PASSIVE: "approach_passive",
 }

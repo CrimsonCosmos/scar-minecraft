@@ -9,3 +9,6 @@ build/
 auth_cache/
 *.pkl
 .DS_Store
+.server-cache/
+.jdk/
+test-server/

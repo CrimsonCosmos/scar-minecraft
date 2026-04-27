@@ -45,6 +45,7 @@ class CompositionalDistinction:
         patterns_per_modality: int = 15,
         enable_salience: bool = False,
         modality_thresholds: list[float] | None = None,
+        adaptive_thresholds: bool = False,
     ) -> None:
         self.modality_slices = modality_slices
         self.similarity_threshold = similarity_threshold
@@ -66,6 +67,11 @@ class CompositionalDistinction:
                 max_patterns=patterns_per_modality,
                 enable_salience=enable_salience,
             )
+            if adaptive_thresholds:
+                d.enable_adaptive(
+                    threshold_min=max(0.0, threshold - 0.15),
+                    threshold_max=min(1.0, threshold + 0.10),
+                )
             self._modal_distinctions.append(d)
 
         # Composite patterns: keyed by tuple of per-modality pattern IDs
@@ -201,6 +207,20 @@ class CompositionalDistinction:
         self._evicted_ids.clear()
         self._last_evicted = None
         return result
+
+    def get_threshold_report(self) -> list[dict]:
+        """Return current threshold status for each modality (diagnostics)."""
+        return [
+            {
+                "modality": i,
+                "threshold": md.similarity_threshold,
+                "min": md._threshold_min,
+                "max": md._threshold_max,
+                "patterns": len(md.patterns),
+                "adaptive": md._adaptive,
+            }
+            for i, md in enumerate(self._modal_distinctions)
+        ]
 
     def _cascade_evictions(self) -> None:
         """Check all modality distinctions for evictions, cascade to composites.

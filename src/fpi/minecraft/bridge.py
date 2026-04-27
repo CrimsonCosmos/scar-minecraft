@@ -99,8 +99,7 @@ class MinecraftBridge:
         Returns:
             Dict with keys: health, food, xp_level, xp_points, position,
             yaw, pitch, on_ground, is_in_water, is_raining, time_of_day,
-            light_level, altitude, block_composition, entities, inventory,
-            alive.
+            light_level, altitude, spatial, entities, inventory, alive.
         """
         self._send({"cmd": "get_state"})
         response = self._recv()
