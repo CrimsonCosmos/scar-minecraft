@@ -12,3 +12,7 @@ auth_cache/
 .server-cache/
 .jdk/
 test-server/
+
+# AI assistant files
+CLAUDE.md
+.claude/
